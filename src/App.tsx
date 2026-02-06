@@ -5,7 +5,6 @@ import {
   webDarkTheme,
   Button,
   Card,
-  CardHeader,
   Title3,
   Body1,
   Spinner,
@@ -54,10 +53,6 @@ const injectLineNumbers = (node: any) => {
   if (node.children) {
     node.children.forEach(injectLineNumbers);
   }
-};
-
-const remarkLineNumber = () => (tree: any) => {
-  injectLineNumbers(tree);
 };
 
 const useStyles = makeStyles({
@@ -258,6 +253,121 @@ function App() {
   const styles = useStyles();
   const toasterId = useId('toaster');
   const { dispatchToast } = useToastController(toasterId);
+
+  // 解析 Markdown 内容为分块
+  const parseMarkdownToBlocks = useCallback((content: string): MarkdownBlock[] => {
+    if (!content) return [];
+    
+    // 使用与预览相同的插件，确保解析结构一致
+    const processor = unified()
+      .use(remarkParse)
+      .use(remarkGfm)
+      .use(remarkMath);
+    const ast = processor.parse(content);
+    const lines = content.split(/\r?\n/);
+    const blocks: MarkdownBlock[] = [];
+    
+    // 递归获取所有需要作为独立分块的原子节点
+    const getAtomNodes = (nodes: any[]): any[] => {
+      let atoms: any[] = [];
+      if (!nodes) return atoms;
+
+      nodes.forEach(node => {
+        // 容器类型：继续递归以获取更细的分块
+        const containerTypes = ['root', 'list', 'listItem', 'blockquote'];
+        // 不可拆分的复杂块：这些必须作为一个整体，否则会破坏 Markdown 语法
+        const complexTypes = ['table', 'code', 'html', 'math', 'yaml', 'toml', 'footnoteDefinition', 'thematicBreak'];
+        
+        if (containerTypes.includes(node.type) && node.children) {
+          atoms = atoms.concat(getAtomNodes(node.children));
+        } else if (complexTypes.includes(node.type)) {
+          atoms.push(node);
+        } else {
+          // 对于 paragraph, heading 等“文本类块”，我们将其进一步拆分为“行”
+          // 这样可以解决 1.1, 1.2 在同一段落的问题，也能处理大段文字
+          if (node.position) {
+            const startLine = node.position.start.line;
+            const endLine = node.position.end.line;
+            
+            if (startLine < endLine && (node.type === 'paragraph' || node.type === 'heading')) {
+              for (let l = startLine; l <= endLine; l++) {
+                atoms.push({
+                  type: 'line',
+                  position: {
+                    start: { line: l, column: 1 },
+                    end: { line: l, column: 1 }
+                  }
+                });
+              }
+            } else {
+              atoms.push(node);
+            }
+          } else {
+            atoms.push(node);
+          }
+        }
+      });
+      return atoms;
+    };
+
+    const children = (ast as any).children;
+    const atomNodes = getAtomNodes(children)
+      .filter(node => node.position)
+      .sort((a, b) => {
+        if (a.position.start.line !== b.position.start.line) {
+          return a.position.start.line - b.position.start.line;
+        }
+        return a.position.end.line - b.position.end.line;
+      });
+
+    let lastLineProcessed = 0; // 0-indexed
+
+    atomNodes.forEach((node: any, idx: number) => {
+      const startLine = node.position.start.line; // 1-indexed
+      const endLine = node.position.end.line;     // 1-indexed
+
+      // 填充节点之前的空白行或未识别行，每一行作为一个独立分块
+      if (startLine - 1 > lastLineProcessed) {
+        for (let i = lastLineProcessed; i < startLine - 1; i++) {
+          blocks.push({
+            id: `gap-${i + 1}`,
+            content: lines[i],
+            startLine: i + 1,
+            endLine: i + 1
+          });
+        }
+        lastLineProcessed = startLine - 1;
+      }
+
+      // 添加节点本身
+      // 确保不与已处理的行重叠（处理某些 AST 节点可能存在的行重叠）
+      const actualStartLine = Math.max(startLine, lastLineProcessed + 1);
+      if (endLine >= actualStartLine) {
+        const blockContent = lines.slice(actualStartLine - 1, endLine).join('\n');
+        blocks.push({
+          id: `block-${idx}-${actualStartLine}`,
+          content: blockContent,
+          startLine: actualStartLine,
+          endLine
+        });
+        lastLineProcessed = endLine;
+      }
+    });
+
+    // 处理文件末尾的剩余行
+    if (lastLineProcessed < lines.length) {
+      for (let i = lastLineProcessed; i < lines.length; i++) {
+        blocks.push({
+          id: `gap-end-${i + 1}`,
+          content: lines[i],
+          startLine: i + 1,
+          endLine: i + 1
+        });
+      }
+    }
+
+    return blocks;
+  }, []);
   
   // 虚拟列表引用
   const leftVirtuosoRef = useRef<any>(null);
@@ -446,51 +556,19 @@ function App() {
         setLoadingMessage('正在解析文档结构...');
         await new Promise(resolve => setTimeout(resolve, 10));
 
-        const processor = unified().use(remarkParse);
-        const ast = processor.parse(content);
-        const children = (ast as any).children;
-        
-        const blocks: MarkdownBlock[] = [];
-        const lines = content.split('\n');
-        const totalNodes = children.length;
-
-        // 分片处理，避免长时间阻塞主线程
-        const chunkSize = 200;
-        for (let i = 0; i < totalNodes; i += chunkSize) {
-          const chunk = children.slice(i, i + chunkSize);
-          
-          chunk.forEach((node: any, idx: number) => {
-            if (node.position) {
-              const startLine = node.position.start.line;
-              const endLine = node.position.end.line;
-              const blockContent = lines.slice(startLine - 1, endLine).join('\n');
-              
-              blocks.push({
-                id: `block-${i + idx}`,
-                content: blockContent,
-                startLine,
-                endLine
-              });
-            }
-          });
-
-          if (totalNodes > chunkSize) {
-            setLoadingMessage(`正在解析文档结构 (${Math.round(Math.min(i + chunkSize, totalNodes) / totalNodes * 100)}%)...`);
-            await new Promise(resolve => setTimeout(resolve, 0));
-          }
-        }
-
+        const blocks = parseMarkdownToBlocks(content);
         setMarkdownBlocks(blocks);
+        
         setCurrentFile(selected as string);
         setIsDirty(false);
-        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\\\\\]/).pop()}`);
+        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\]/).pop()}`);
         setIsLoading(false);
       }
     } catch (error) {
       setIsLoading(false);
       showErrorToast(`读取文件失败: ${error}`);
     }
-  }, [showSuccessToast, showErrorToast, isDirty]);
+  }, [showSuccessToast, showErrorToast, isDirty, parseMarkdownToBlocks]);
 
   // 保存文件
   const handleSave = useCallback(async () => {
@@ -551,29 +629,9 @@ function App() {
       const content = await invoke<string>('read_markdown_file', { path: currentFile });
       setMarkdownContent(content);
 
-      const processor = unified().use(remarkParse);
-      const ast = processor.parse(content);
-      const children = (ast as any).children;
-      
-      const blocks: MarkdownBlock[] = [];
-      const lines = content.split('\n');
-      
-      children.forEach((node: any, idx: number) => {
-        if (node.position) {
-          const startLine = node.position.start.line;
-          const endLine = node.position.end.line;
-          const blockContent = lines.slice(startLine - 1, endLine).join('\n');
-          
-          blocks.push({
-            id: `block-${idx}`,
-            content: blockContent,
-            startLine,
-            endLine
-          });
-        }
-      });
-
+      const blocks = parseMarkdownToBlocks(content);
       setMarkdownBlocks(blocks);
+      
       setIsDirty(false);
       showSuccessToast('已恢复到原始状态');
     } catch (error) {
@@ -581,7 +639,7 @@ function App() {
     } finally {
       setIsLoading(false);
     }
-  }, [currentFile, showSuccessToast, showErrorToast]);
+  }, [currentFile, showSuccessToast, showErrorToast, parseMarkdownToBlocks]);
 
   // 导出为 PDF
   const handleExportPdf = useCallback(async () => {
@@ -697,8 +755,8 @@ function App() {
             {/* 左侧：源码（虚拟化） */}
             <div className={styles.pane}>
               <div className={styles.paneHeader}>
-                <Body1 strong>Markdown 源码 (可编辑)</Body1>
-                {currentFile && <Body1 size={200}>{(currentFile as string).split(/[/\\\\]/).pop()}</Body1>}
+                <Body1><b>Markdown 源码 (可编辑)</b></Body1>
+                {currentFile && <Body1>{(currentFile as string).split(/[/\\\\]/).pop()}</Body1>}
               </div>
               <div className={styles.scrollArea}>
                 <Virtuoso
@@ -741,8 +799,8 @@ function App() {
             {/* 右侧：预览（虚拟化） */}
             <div className={styles.pane}>
               <div className={styles.paneHeader}>
-                <Body1 strong>PDF 预览</Body1>
-                <Body1 size={200}>共 {markdownContent.length} 字符</Body1>
+                <Body1><b>PDF 预览</b></Body1>
+                <Body1>共 {markdownContent.length} 字符</Body1>
               </div>
               <div className={`${styles.scrollArea} markdown-preview`}>
                 {markdownContent ? (
