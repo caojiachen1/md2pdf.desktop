@@ -129,6 +129,15 @@ const useStyles = makeStyles({
     ...shorthands.padding('4px', '16px'),
     color: tokens.colorNeutralForeground1,
     ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke3),
+    width: '100%',
+    border: 'none',
+    outline: 'none',
+    resize: 'none',
+    backgroundColor: 'transparent',
+    display: 'block',
+    boxSizing: 'border-box',
+    fieldSizing: 'content' as any,
+    minHeight: '1.6em',
   },
   previewRow: {
     ...shorthands.padding('4px', '24px'),
@@ -224,6 +233,26 @@ function App() {
   const calibrationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLeftTopIndex = useRef(0);
   const lastRightTopIndex = useRef(0);
+
+  // 处理块内容修改
+  const handleBlockChange = useCallback((index: number, newContent: string) => {
+    setMarkdownBlocks(prev => {
+      const next = [...prev];
+      if (next[index].content === newContent) return prev;
+      next[index] = { ...next[index], content: newContent };
+      return next;
+    });
+  }, []);
+
+  // 当 blocks 变化时同步更新全量内容（用于导出和字符统计）
+  useEffect(() => {
+    if (markdownBlocks.length > 0) {
+      const newContent = markdownBlocks.map(b => b.content).join('\n');
+      if (newContent !== markdownContent) {
+        setMarkdownContent(newContent);
+      }
+    }
+  }, [markdownBlocks, markdownContent]);
 
   // rangeChanged 回调：当最上方可见块变化时，立即同步另一侧
   const handleLeftRangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
@@ -485,8 +514,8 @@ function App() {
             {/* 左侧：源码（虚拟化） */}
             <div className={styles.pane}>
               <div className={styles.paneHeader}>
-                <Body1 strong>Markdown 源码</Body1>
-                {currentFile && <Body1 size={200}>{(currentFile as string).split(/[/\\]/).pop()}</Body1>}
+                <Body1 strong>Markdown 源码 (可编辑)</Body1>
+                {currentFile && <Body1 size={200}>{(currentFile as string).split(/[/\\\\]/).pop()}</Body1>}
               </div>
               <div className={styles.scrollArea}>
                 <Virtuoso
@@ -495,10 +524,13 @@ function App() {
                   style={{ height: '100%' }}
                   data={markdownBlocks}
                   rangeChanged={handleLeftRangeChanged}
-                  itemContent={(_index, block) => (
-                    <div className={styles.editorRow}>
-                      {block.content || ' '}
-                    </div>
+                  itemContent={(index, block) => (
+                    <textarea
+                      className={styles.editorRow}
+                      value={block.content}
+                      onChange={(e) => handleBlockChange(index, e.target.value)}
+                      spellCheck={false}
+                    />
                   )}
                 />
               </div>
