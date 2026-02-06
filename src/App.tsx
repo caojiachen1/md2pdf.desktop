@@ -224,98 +224,57 @@ function App() {
   const calibrationTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastLeftTopIndex = useRef(0);
   const lastRightTopIndex = useRef(0);
-  const blocksRef = useRef<MarkdownBlock[]>([]);
-  blocksRef.current = markdownBlocks;
 
-  // rangeChanged 回调：记录两侧最上方可见块索引
+  // rangeChanged 回调：当最上方可见块变化时，立即同步另一侧
   const handleLeftRangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
-    lastLeftTopIndex.current = range.startIndex;
+    const newTopIndex = range.startIndex;
+    // 只有当索引真正变化时才同步
+    if (newTopIndex === lastLeftTopIndex.current) return;
+    lastLeftTopIndex.current = newTopIndex;
+
+    // 只有当左侧是活跃面板时才同步右侧
+    if (activePane.current !== 'left' || isProgrammatic.current) return;
+
+    // 防抖：50ms 内只执行一次同步
+    if (calibrationTimer.current) clearTimeout(calibrationTimer.current);
+    calibrationTimer.current = setTimeout(() => {
+      isProgrammatic.current = true;
+      rightVirtuosoRef.current?.scrollToIndex({
+        index: newTopIndex,
+        align: 'start',
+        behavior: 'auto',
+      });
+      setTimeout(() => { isProgrammatic.current = false; }, 100);
+    }, 50);
   }, []);
 
   const handleRightRangeChanged = useCallback((range: { startIndex: number; endIndex: number }) => {
-    lastRightTopIndex.current = range.startIndex;
-  }, []);
+    const newTopIndex = range.startIndex;
+    if (newTopIndex === lastRightTopIndex.current) return;
+    lastRightTopIndex.current = newTopIndex;
 
-  // 块级校准：将另一侧对齐到同一个块
-  const calibrate = useCallback((source: 'left' | 'right') => {
-    const topIndex = source === 'left' ? lastLeftTopIndex.current : lastRightTopIndex.current;
-    const targetRef = source === 'left' ? rightVirtuosoRef : leftVirtuosoRef;
-
-    isProgrammatic.current = true;
-    targetRef.current?.scrollToIndex({
-      index: topIndex,
-      align: 'start',
-      behavior: 'auto',
-    });
-    setTimeout(() => { isProgrammatic.current = false; }, 120);
-  }, []);
-
-  // 核心滚动处理函数（存在 ref 中避免闭包过时）
-  const handleScroll = useRef((source: 'left' | 'right') => {
-    // 只有用户主动操作的面板才触发同步
-    if (isProgrammatic.current || activePane.current !== source) return;
-    if (blocksRef.current.length === 0) return;
-
-    const srcEl = source === 'left' ? leftScrollerRef.current : rightScrollerRef.current;
-    const tgtEl = source === 'left' ? rightScrollerRef.current : leftScrollerRef.current;
-    if (!srcEl || !tgtEl) return;
-
-    // 百分比连续同步
-    const srcMax = srcEl.scrollHeight - srcEl.clientHeight;
-    const tgtMax = tgtEl.scrollHeight - tgtEl.clientHeight;
-    if (srcMax > 0 && tgtMax > 0) {
-      const ratio = srcEl.scrollTop / srcMax;
-      const targetST = Math.round(ratio * tgtMax);
-      if (Math.abs(tgtEl.scrollTop - targetST) > 1) {
-        isProgrammatic.current = true;
-        tgtEl.scrollTop = targetST;
-        requestAnimationFrame(() => {
-          isProgrammatic.current = false;
-        });
-      }
-    }
-
-    // 防抖校准：滚动停止 150ms 后执行块级对齐
-    if (calibrationTimer.current) clearTimeout(calibrationTimer.current);
-    calibrationTimer.current = setTimeout(() => calibrate(source), 150);
-  });
-  // 更新 ref 以获取最新的 calibrate
-  handleScroll.current = (source: 'left' | 'right') => {
-    if (isProgrammatic.current || activePane.current !== source) return;
-    if (blocksRef.current.length === 0) return;
-
-    const srcEl = source === 'left' ? leftScrollerRef.current : rightScrollerRef.current;
-    const tgtEl = source === 'left' ? rightScrollerRef.current : leftScrollerRef.current;
-    if (!srcEl || !tgtEl) return;
-
-    const srcMax = srcEl.scrollHeight - srcEl.clientHeight;
-    const tgtMax = tgtEl.scrollHeight - tgtEl.clientHeight;
-    if (srcMax > 0 && tgtMax > 0) {
-      const ratio = srcEl.scrollTop / srcMax;
-      const targetST = Math.round(ratio * tgtMax);
-      if (Math.abs(tgtEl.scrollTop - targetST) > 1) {
-        isProgrammatic.current = true;
-        tgtEl.scrollTop = targetST;
-        requestAnimationFrame(() => {
-          isProgrammatic.current = false;
-        });
-      }
-    }
+    if (activePane.current !== 'right' || isProgrammatic.current) return;
 
     if (calibrationTimer.current) clearTimeout(calibrationTimer.current);
-    calibrationTimer.current = setTimeout(() => calibrate(source), 150);
-  };
+    calibrationTimer.current = setTimeout(() => {
+      isProgrammatic.current = true;
+      leftVirtuosoRef.current?.scrollToIndex({
+        index: newTopIndex,
+        align: 'start',
+        behavior: 'auto',
+      });
+      setTimeout(() => { isProgrammatic.current = false; }, 100);
+    }, 50);
+  }, []);
 
-  // scrollerRef 回调：获取元素 + 绑定事件
+  // scrollerRef 回调：获取元素 + 追踪活跃面板
   const leftScrollerCallback = useCallback((el: HTMLElement | Window | null) => {
     if (el instanceof HTMLElement) {
-      // 移除旧的监听器
       if (leftScrollerRef.current && leftScrollerRef.current !== el) {
         const old = leftScrollerRef.current;
-        old.onscroll = null;
+        old.onpointerenter = null;
       }
       leftScrollerRef.current = el;
-      el.onscroll = () => handleScroll.current('left');
       el.onpointerenter = () => { activePane.current = 'left'; };
     }
   }, []);
@@ -324,10 +283,9 @@ function App() {
     if (el instanceof HTMLElement) {
       if (rightScrollerRef.current && rightScrollerRef.current !== el) {
         const old = rightScrollerRef.current;
-        old.onscroll = null;
+        old.onpointerenter = null;
       }
       rightScrollerRef.current = el;
-      el.onscroll = () => handleScroll.current('right');
       el.onpointerenter = () => { activePane.current = 'right'; };
     }
   }, []);
