@@ -1,8 +1,6 @@
-use base64::{engine::general_purpose, Engine as _};
 use headless_chrome::{Browser, LaunchOptions};
 use pulldown_cmark::{html, Options, Parser};
 use std::fs;
-use std::path::Path;
 use std::time::Duration;
 use thiserror::Error;
 
@@ -209,79 +207,78 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
 
 /// 导出为 PDF
 #[tauri::command]
-fn export_to_pdf(html_content: &str, output_path: &str, title: &str) -> Result<(), AppError> {
-    // 生成完整的 HTML 页面
-    let full_html = generate_full_html(html_content, title);
+async fn export_to_pdf(html_content: String, output_path: String, title: String) -> Result<(), AppError> {
+    // 在后台线程中执行，避免阻塞
+    tokio::task::spawn_blocking(move || {
+        // 生成完整的 HTML 页面
+        let full_html = generate_full_html(&html_content, &title);
 
-    // 写入临时文件以避免 data URL 限制和 ERR_ABORTED 错误
-    let temp_path = std::env::temp_dir().join(format!("md2pdf_temp_{}.html", std::process::id()));
-    fs::write(&temp_path, &full_html).map_err(|e| AppError::FileReadError(e))?;
-    
-    let path_str = temp_path.to_string_lossy().replace("\\", "/");
-    let data_url = if path_str.starts_with('/') {
-        format!("file://{}", path_str)
-    } else {
-        format!("file:///{}", path_str)
-    };
+        // 写入临时文件
+        let temp_path = std::env::temp_dir().join(format!("md2pdf_temp_{}.html", std::process::id()));
+        fs::write(&temp_path, &full_html).map_err(|e| AppError::FileReadError(e))?;
+        
+        let path_str = temp_path.to_string_lossy().replace("\\", "/");
+        let data_url = if path_str.starts_with('/') {
+            format!("file://{}", path_str)
+        } else {
+            format!("file:///{}", path_str)
+        };
 
-    // 配置浏览器启动选项
-    let launch_options = LaunchOptions::default_builder()
-        .headless(true)
-        .sandbox(false)
-        .idle_browser_timeout(Duration::from_secs(60))
-        .build()
-        .map_err(|e| AppError::BrowserError(e.to_string()))?;
+        // 配置浏览器启动选项
+        let launch_options = LaunchOptions::default_builder()
+            .headless(true)
+            .sandbox(false)
+            // 移除超时限制
+            .build()
+            .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
-    // 启动浏览器
-    let browser = Browser::new(launch_options)
-        .map_err(|e| AppError::BrowserError(e.to_string()))?;
+        // 启动浏览器
+        let browser = Browser::new(launch_options)
+            .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
-    // 创建新标签页
-    let tab = browser
-        .new_tab()
-        .map_err(|e| AppError::BrowserError(e.to_string()))?;
+        // 创建新标签页
+        let tab = browser
+            .new_tab()
+            .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
-    // 导航到 HTML 页面
-    tab.navigate_to(&data_url)
-        .map_err(|e| AppError::BrowserError(format!("导航失败: {}", e)))?;
+        // 导航到 HTML 页面
+        // 触发导航
+        tab.navigate_to(&data_url)
+            .map_err(|e| AppError::BrowserError(format!("导航触发失败: {}", e)))?;
 
-    // 等待页面加载完成
-    // 对于本地文件，wait_until_navigated 可能会因为加载太快而错过事件，因此我们结合使用 wait_for_element
-    let _ = tab.wait_until_navigated();
-    tab.wait_for_element("body")
-        .map_err(|e| AppError::BrowserError(format!("等待页面加载失败: {}", e)))?;
+        // 彻底去掉库的事件等待，改用固定睡眠
+        // 对于大文件，我们给足 5-10 秒的渲染时间，这在后台执行是可以接受的
+        std::thread::sleep(Duration::from_secs(5));
 
-    // 等待 KaTeX 渲染完成（等待一段时间确保数学公式渲染）
-    std::thread::sleep(Duration::from_millis(1000));
+        // 生成 PDF
+        let pdf_options = headless_chrome::types::PrintToPdfOptions {
+            landscape: Some(false),
+            display_header_footer: Some(false),
+            print_background: Some(true),
+            scale: Some(1.0),
+            paper_width: Some(8.27),
+            paper_height: Some(11.69),
+            margin_top: Some(0.4),
+            margin_bottom: Some(0.4),
+            margin_left: Some(0.4),
+            margin_right: Some(0.4),
+            prefer_css_page_size: Some(true),
+            ..Default::default()
+        };
 
-    // 生成 PDF
-    let pdf_options = headless_chrome::types::PrintToPdfOptions {
-        landscape: Some(false),
-        display_header_footer: Some(false),
-        print_background: Some(true),
-        scale: Some(1.0),
-        paper_width: Some(8.27),  // A4 宽度（英寸）
-        paper_height: Some(11.69), // A4 高度（英寸）
-        margin_top: Some(0.4),
-        margin_bottom: Some(0.4),
-        margin_left: Some(0.4),
-        margin_right: Some(0.4),
-        prefer_css_page_size: Some(true),
-        ..Default::default()
-    };
+        let pdf_data = tab
+            .print_to_pdf(Some(pdf_options))
+            .map_err(|e| AppError::PdfError(format!("PDF 生成失败 (可能是文档过大渲染未完成): {}", e)))?;
 
-    let pdf_data = tab
-        .print_to_pdf(Some(pdf_options))
-        .map_err(|e| AppError::PdfError(e.to_string()))?;
+        // 写入文件
+        let output_path_buf = std::path::Path::new(&output_path);
+        fs::write(output_path_buf, pdf_data).map_err(|e| AppError::FileReadError(e))?;
 
-    // 写入文件
-    let output_path_buf = Path::new(output_path);
-    fs::write(output_path_buf, pdf_data).map_err(|e| AppError::FileReadError(e))?;
+        // 清理临时文件
+        let _ = fs::remove_file(temp_path);
 
-    // 清理临时文件
-    let _ = fs::remove_file(temp_path);
-
-    Ok(())
+        Ok(())
+    }).await.map_err(|e| AppError::PdfError(e.to_string()))?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

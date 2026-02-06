@@ -342,39 +342,51 @@ function App() {
 
       if (selected) {
         setIsLoading(true);
-        setLoadingMessage('正在解析文档结构...');
+        setLoadingMessage('正在读取文件...');
 
         const content = await invoke<string>('read_markdown_file', { path: selected });
         setMarkdownContent(content);
 
-        // 使用 unified 解析 AST 并按顶级节点分割块
+        setLoadingMessage('正在解析文档结构...');
+        await new Promise(resolve => setTimeout(resolve, 10));
+
         const processor = unified().use(remarkParse);
         const ast = processor.parse(content);
         const children = (ast as any).children;
         
         const blocks: MarkdownBlock[] = [];
         const lines = content.split('\n');
+        const totalNodes = children.length;
 
-        children.forEach((node: any, index: number) => {
-          if (node.position) {
-            const startLine = node.position.start.line;
-            const endLine = node.position.end.line;
-            
-            // 提取该块对应的原始文本
-            const blockContent = lines.slice(startLine - 1, endLine).join('\n');
-            
-            blocks.push({
-              id: `block-${index}`,
-              content: blockContent,
-              startLine,
-              endLine
-            });
+        // 分片处理，避免长时间阻塞主线程
+        const chunkSize = 200;
+        for (let i = 0; i < totalNodes; i += chunkSize) {
+          const chunk = children.slice(i, i + chunkSize);
+          
+          chunk.forEach((node: any, idx: number) => {
+            if (node.position) {
+              const startLine = node.position.start.line;
+              const endLine = node.position.end.line;
+              const blockContent = lines.slice(startLine - 1, endLine).join('\n');
+              
+              blocks.push({
+                id: `block-${i + idx}`,
+                content: blockContent,
+                startLine,
+                endLine
+              });
+            }
+          });
+
+          if (totalNodes > chunkSize) {
+            setLoadingMessage(`正在解析文档结构 (${Math.round(Math.min(i + chunkSize, totalNodes) / totalNodes * 100)}%)...`);
+            await new Promise(resolve => setTimeout(resolve, 0));
           }
-        });
+        }
 
         setMarkdownBlocks(blocks);
         setCurrentFile(selected as string);
-        showSuccessToast(`已加载 ${(selected as string).split(/[/\\]/).pop()}`);
+        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\]/).pop()}`);
         setIsLoading(false);
       }
     } catch (error) {
@@ -391,7 +403,6 @@ function App() {
     }
 
     try {
-      // 选择保存路径
       const savePath = await save({
         filters: [{
           name: 'PDF 文档',
@@ -403,9 +414,9 @@ function App() {
       if (!savePath) return;
 
       setIsLoading(true);
-      setLoadingMessage('正在生成 PDF...');
+      setLoadingMessage('正在生成 HTML 内容...');
+      await new Promise(resolve => setTimeout(resolve, 10));
 
-      // 使用 unified 将完整的 markdown 转换为 HTML，而不依赖预览区域的 innerHTML
       const processed = await unified()
         .use(remarkParse)
         .use(remarkGfm)
@@ -416,11 +427,11 @@ function App() {
         .process(markdownContent);
       const previewHtml = processed.toString();
 
-      // 调用 Rust 后端生成 PDF
+      setLoadingMessage('正在启动渲染引擎...');
       await invoke('export_to_pdf', {
         htmlContent: previewHtml,
         outputPath: savePath,
-        title: currentFile ? currentFile.split(/[/\\\\]/).pop()?.replace(/\\.(md|markdown)$/i, '') : 'document'
+        title: currentFile ? currentFile.split(/[/\\\\]/).pop()?.replace(/\.(md|markdown)$/i, '') : 'document'
       });
 
       setIsLoading(false);
