@@ -25,6 +25,8 @@ import {
   DocumentRegular,
   CheckmarkCircleRegular,
   DismissCircleRegular,
+  DeleteRegular,
+  MergeRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -128,9 +130,11 @@ const useStyles = makeStyles({
     wordBreak: 'break-all',
     ...shorthands.padding('4px', '16px'),
     color: tokens.colorNeutralForeground1,
-    ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke3),
     width: '100%',
-    border: 'none',
+    borderTop: 'none',
+    borderLeft: 'none',
+    borderRight: 'none',
+    borderBottom: `2px dashed ${tokens.colorNeutralStroke3}`,
     outline: 'none',
     resize: 'none',
     backgroundColor: 'transparent',
@@ -138,11 +142,19 @@ const useStyles = makeStyles({
     boxSizing: 'border-box',
     fieldSizing: 'content' as any,
     minHeight: '1.6em',
+    marginBottom: '8px',
   },
   previewRow: {
     ...shorthands.padding('4px', '24px'),
     position: 'relative',
     ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke3),
+    minHeight: '2em',
+  },
+  blockDivider: {
+    height: '1px',
+    backgroundColor: tokens.colorNeutralStroke3,
+    width: '100%',
+    marginTop: '4px',
   },
   statusBar: {
     display: 'flex',
@@ -201,6 +213,27 @@ const useStyles = makeStyles({
     alignItems: 'center',
     ...shorthands.gap('16px'),
   },
+  blockContainer: {
+    position: 'relative',
+    '&:hover .block-toolbar': {
+      opacity: 1,
+    },
+  },
+  blockToolbar: {
+    position: 'absolute',
+    top: '4px',
+    right: '8px',
+    display: 'flex',
+    ...shorthands.gap('4px'),
+    opacity: 0,
+    transitionProperty: 'opacity',
+    transitionDuration: '0.2s',
+    zIndex: 10,
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.padding('2px'),
+    ...shorthands.borderRadius('4px'),
+    ...shorthands.border('1px', 'solid', tokens.colorNeutralStroke1),
+  },
 });
 
 interface MarkdownBlock {
@@ -240,6 +273,28 @@ function App() {
       const next = [...prev];
       if (next[index].content === newContent) return prev;
       next[index] = { ...next[index], content: newContent };
+      return next;
+    });
+  }, []);
+
+  // 删除区块
+  const handleDeleteBlock = useCallback((index: number) => {
+    setMarkdownBlocks(prev => {
+      if (prev.length <= 1) return prev; // 至少保留一个区块
+      const next = [...prev];
+      next.splice(index, 1);
+      return next;
+    });
+  }, []);
+
+  // 合并区块（与下一个区块合并）
+  const handleMergeNext = useCallback((index: number) => {
+    setMarkdownBlocks(prev => {
+      if (index >= prev.length - 1) return prev;
+      const next = [...prev];
+      const mergedContent = next[index].content + '\n' + next[index + 1].content;
+      next[index] = { ...next[index], content: mergedContent };
+      next.splice(index + 1, 1);
       return next;
     });
   }, []);
@@ -525,12 +580,31 @@ function App() {
                   data={markdownBlocks}
                   rangeChanged={handleLeftRangeChanged}
                   itemContent={(index, block) => (
-                    <textarea
-                      className={styles.editorRow}
-                      value={block.content}
-                      onChange={(e) => handleBlockChange(index, e.target.value)}
-                      spellCheck={false}
-                    />
+                    <div className={styles.blockContainer}>
+                      <div className={`${styles.blockToolbar} block-toolbar`}>
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<MergeRegular />}
+                          onClick={() => handleMergeNext(index)}
+                          disabled={index === markdownBlocks.length - 1}
+                          title="与下方合并"
+                        />
+                        <Button
+                          size="small"
+                          appearance="subtle"
+                          icon={<DeleteRegular />}
+                          onClick={() => handleDeleteBlock(index)}
+                          title="删除区块"
+                        />
+                      </div>
+                      <textarea
+                        className={styles.editorRow}
+                        value={block.content}
+                        onChange={(e) => handleBlockChange(index, e.target.value)}
+                        spellCheck={false}
+                      />
+                    </div>
                   )}
                 />
               </div>
@@ -550,8 +624,25 @@ function App() {
                     style={{ height: '100%' }}
                     data={markdownBlocks}
                     rangeChanged={handleRightRangeChanged}
-                    itemContent={(_index, block) => (
-                      <div className={styles.previewRow}>
+                    itemContent={(index, block) => (
+                      <div className={`${styles.previewRow} ${styles.blockContainer}`}>
+                        <div className={`${styles.blockToolbar} block-toolbar`}>
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            icon={<MergeRegular />}
+                            onClick={() => handleMergeNext(index)}
+                            disabled={index === markdownBlocks.length - 1}
+                            title="与下方合并"
+                          />
+                          <Button
+                            size="small"
+                            appearance="subtle"
+                            icon={<DeleteRegular />}
+                            onClick={() => handleDeleteBlock(index)}
+                            title="删除区块"
+                          />
+                        </div>
                         <ReactMarkdown
                           remarkPlugins={[remarkGfm, remarkMath]}
                           rehypePlugins={[rehypeKatex]}
