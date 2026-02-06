@@ -27,9 +27,13 @@ import {
   DismissCircleRegular,
   DeleteRegular,
   MergeRegular,
+  SaveRegular,
+  SaveCopyRegular,
+  ArrowUndoRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
+import { writeTextFile } from '@tauri-apps/plugin-fs';
 import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import remarkGfm from 'remark-gfm';
@@ -248,6 +252,7 @@ function App() {
   const [markdownContent, setMarkdownContent] = useState('');
   const [markdownBlocks, setMarkdownBlocks] = useState<MarkdownBlock[]>([]);
   const [currentFile, setCurrentFile] = useState<string | null>(null);
+  const [isDirty, setIsDirty] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('');
   const styles = useStyles();
@@ -273,6 +278,7 @@ function App() {
       const next = [...prev];
       if (next[index].content === newContent) return prev;
       next[index] = { ...next[index], content: newContent };
+      setIsDirty(true);
       return next;
     });
   }, []);
@@ -283,6 +289,7 @@ function App() {
       if (prev.length <= 1) return prev; // 至少保留一个区块
       const next = [...prev];
       next.splice(index, 1);
+      setIsDirty(true);
       return next;
     });
   }, []);
@@ -295,6 +302,7 @@ function App() {
       const mergedContent = next[index].content + '\n' + next[index + 1].content;
       next[index] = { ...next[index], content: mergedContent };
       next.splice(index + 1, 1);
+      setIsDirty(true);
       return next;
     });
   }, []);
@@ -415,6 +423,10 @@ function App() {
 
   // 选择 Markdown 文件
   const handleSelectFile = useCallback(async () => {
+    if (isDirty) {
+      const confirm = await window.confirm('当前文件有未保存的更改，确定要打开新文件吗？（更改将丢失）');
+      if (!confirm) return;
+    }
     try {
       const selected = await open({
         multiple: false,
@@ -470,14 +482,106 @@ function App() {
 
         setMarkdownBlocks(blocks);
         setCurrentFile(selected as string);
-        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\]/).pop()}`);
+        setIsDirty(false);
+        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\\\\\]/).pop()}`);
         setIsLoading(false);
       }
     } catch (error) {
       setIsLoading(false);
       showErrorToast(`读取文件失败: ${error}`);
     }
-  }, [showSuccessToast, showErrorToast]);
+  }, [showSuccessToast, showErrorToast, isDirty]);
+
+  // 保存文件
+  const handleSave = useCallback(async () => {
+    if (!currentFile || !markdownContent) return;
+
+    try {
+      setIsLoading(true);
+      setLoadingMessage('正在保存文件...');
+      await writeTextFile(currentFile, markdownContent);
+      setIsDirty(false);
+      showSuccessToast('文件已保存');
+    } catch (error) {
+      showErrorToast(`保存失败: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentFile, markdownContent, showSuccessToast, showErrorToast]);
+
+  // 另存为
+  const handleSaveAs = useCallback(async () => {
+    if (!markdownContent) return;
+
+    try {
+      const savePath = await save({
+        filters: [{
+          name: 'Markdown',
+          extensions: ['md', 'markdown']
+        }],
+        defaultPath: currentFile || 'document.md'
+      });
+
+      if (!savePath) return;
+
+      setIsLoading(true);
+      setLoadingMessage('正在另存为...');
+      await writeTextFile(savePath, markdownContent);
+      setCurrentFile(savePath);
+      setIsDirty(false);
+      showSuccessToast('文件已另存为');
+    } catch (error) {
+      showErrorToast(`另存为失败: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentFile, markdownContent, showSuccessToast, showErrorToast]);
+
+  // 恢复文件（丢弃更改）
+  const handleRestore = useCallback(async () => {
+    if (!currentFile) return;
+
+    const confirm = await window.confirm('确定要恢复到原始状态吗？所有未保存的更改都将丢失。');
+    if (!confirm) return;
+
+    try {
+      setIsLoading(true);
+      setLoadingMessage('正在恢复文件...');
+
+      const content = await invoke<string>('read_markdown_file', { path: currentFile });
+      setMarkdownContent(content);
+
+      const processor = unified().use(remarkParse);
+      const ast = processor.parse(content);
+      const children = (ast as any).children;
+      
+      const blocks: MarkdownBlock[] = [];
+      const lines = content.split('\n');
+      
+      children.forEach((node: any, idx: number) => {
+        if (node.position) {
+          const startLine = node.position.start.line;
+          const endLine = node.position.end.line;
+          const blockContent = lines.slice(startLine - 1, endLine).join('\n');
+          
+          blocks.push({
+            id: `block-${idx}`,
+            content: blockContent,
+            startLine,
+            endLine
+          });
+        }
+      });
+
+      setMarkdownBlocks(blocks);
+      setIsDirty(false);
+      showSuccessToast('已恢复到原始状态');
+    } catch (error) {
+      showErrorToast(`恢复失败: ${error}`);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [currentFile, showSuccessToast, showErrorToast]);
 
   // 导出为 PDF
   const handleExportPdf = useCallback(async () => {
@@ -541,7 +645,31 @@ function App() {
               icon={<ArrowUploadRegular />}
               onClick={handleSelectFile}
             >
-              选择 Markdown 文件
+              打开
+            </Button>
+            <Button
+              appearance="secondary"
+              icon={<SaveRegular />}
+              onClick={handleSave}
+              disabled={!currentFile || !isDirty}
+            >
+              保存
+            </Button>
+            <Button
+              appearance="secondary"
+              icon={<SaveCopyRegular />}
+              onClick={handleSaveAs}
+              disabled={!markdownContent}
+            >
+              另存为
+            </Button>
+            <Button
+              appearance="secondary"
+              icon={<ArrowUndoRegular />}
+              onClick={handleRestore}
+              disabled={!currentFile || !isDirty}
+            >
+              恢复
             </Button>
             <Button
               appearance="primary"
@@ -560,7 +688,7 @@ function App() {
           {currentFile && (
             <div className={styles.statusBar}>
               <DocumentRegular className={styles.statusIcon} />
-              <Body1>当前文件: {currentFile.split(/[/\\\\\\\\]/).pop()}</Body1>
+              <Body1>当前文件: {currentFile.split(/[/\\\\\\\\\\\\\\\\]/).pop()} {isDirty && <span style={{ color: tokens.colorPaletteRedForeground1 }}>* (已修改)</span>}</Body1>
             </div>
           )}
 
