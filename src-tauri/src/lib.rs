@@ -213,6 +213,17 @@ fn export_to_pdf(html_content: &str, output_path: &str, title: &str) -> Result<(
     // 生成完整的 HTML 页面
     let full_html = generate_full_html(html_content, title);
 
+    // 写入临时文件以避免 data URL 限制和 ERR_ABORTED 错误
+    let temp_path = std::env::temp_dir().join(format!("md2pdf_temp_{}.html", std::process::id()));
+    fs::write(&temp_path, &full_html).map_err(|e| AppError::FileReadError(e))?;
+    
+    let path_str = temp_path.to_string_lossy().replace("\\", "/");
+    let data_url = if path_str.starts_with('/') {
+        format!("file://{}", path_str)
+    } else {
+        format!("file:///{}", path_str)
+    };
+
     // 配置浏览器启动选项
     let launch_options = LaunchOptions::default_builder()
         .headless(true)
@@ -230,17 +241,15 @@ fn export_to_pdf(html_content: &str, output_path: &str, title: &str) -> Result<(
         .new_tab()
         .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
-    // 将 HTML 内容编码为 data URL
-    let encoded_html = general_purpose::STANDARD.encode(full_html.as_bytes());
-    let data_url = format!("data:text/html;base64,{}", encoded_html);
-
     // 导航到 HTML 页面
     tab.navigate_to(&data_url)
-        .map_err(|e| AppError::BrowserError(e.to_string()))?;
+        .map_err(|e| AppError::BrowserError(format!("导航失败: {}", e)))?;
 
     // 等待页面加载完成
-    tab.wait_until_navigated()
-        .map_err(|e| AppError::BrowserError(e.to_string()))?;
+    // 对于本地文件，wait_until_navigated 可能会因为加载太快而错过事件，因此我们结合使用 wait_for_element
+    let _ = tab.wait_until_navigated();
+    tab.wait_for_element("body")
+        .map_err(|e| AppError::BrowserError(format!("等待页面加载失败: {}", e)))?;
 
     // 等待 KaTeX 渲染完成（等待一段时间确保数学公式渲染）
     std::thread::sleep(Duration::from_millis(1000));
@@ -266,8 +275,11 @@ fn export_to_pdf(html_content: &str, output_path: &str, title: &str) -> Result<(
         .map_err(|e| AppError::PdfError(e.to_string()))?;
 
     // 写入文件
-    let output_path = Path::new(output_path);
-    fs::write(output_path, pdf_data)?;
+    let output_path_buf = Path::new(output_path);
+    fs::write(output_path_buf, pdf_data).map_err(|e| AppError::FileReadError(e))?;
+
+    // 清理临时文件
+    let _ = fs::remove_file(temp_path);
 
     Ok(())
 }
