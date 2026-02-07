@@ -29,6 +29,7 @@ import {
   SaveRegular,
   SaveCopyRegular,
   ArrowUndoRegular,
+  WandRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
 import { open, save } from '@tauri-apps/plugin-dialog';
@@ -326,15 +327,18 @@ function App() {
       const startLine = node.position.start.line; // 1-indexed
       const endLine = node.position.end.line;     // 1-indexed
 
-      // 填充节点之前的空白行或未识别行，每一行作为一个独立分块
+      // 填充节点之前的空白行或未识别行，每一行作为一个独立分块（跳过空行）
       if (startLine - 1 > lastLineProcessed) {
         for (let i = lastLineProcessed; i < startLine - 1; i++) {
-          blocks.push({
-            id: `gap-${i + 1}`,
-            content: lines[i],
-            startLine: i + 1,
-            endLine: i + 1
-          });
+          const lineContent = lines[i];
+          if (lineContent.trim() !== '') {
+            blocks.push({
+              id: `gap-${i + 1}`,
+              content: lineContent,
+              startLine: i + 1,
+              endLine: i + 1
+            });
+          }
         }
         lastLineProcessed = startLine - 1;
       }
@@ -344,25 +348,31 @@ function App() {
       const actualStartLine = Math.max(startLine, lastLineProcessed + 1);
       if (endLine >= actualStartLine) {
         const blockContent = lines.slice(actualStartLine - 1, endLine).join('\n');
-        blocks.push({
-          id: `block-${idx}-${actualStartLine}`,
-          content: blockContent,
-          startLine: actualStartLine,
-          endLine
-        });
+        // 只有非空内容才添加为块
+        if (blockContent.trim() !== '') {
+          blocks.push({
+            id: `block-${idx}-${actualStartLine}`,
+            content: blockContent,
+            startLine: actualStartLine,
+            endLine
+          });
+        }
         lastLineProcessed = endLine;
       }
     });
 
-    // 处理文件末尾的剩余行
+    // 处理文件末尾的剩余行（跳过空行）
     if (lastLineProcessed < lines.length) {
       for (let i = lastLineProcessed; i < lines.length; i++) {
-        blocks.push({
-          id: `gap-end-${i + 1}`,
-          content: lines[i],
-          startLine: i + 1,
-          endLine: i + 1
-        });
+        const lineContent = lines[i];
+        if (lineContent.trim() !== '') {
+          blocks.push({
+            id: `gap-end-${i + 1}`,
+            content: lineContent,
+            startLine: i + 1,
+            endLine: i + 1
+          });
+        }
       }
     }
 
@@ -409,7 +419,8 @@ function App() {
     setMarkdownBlocks(prev => {
       if (index >= prev.length - 1) return prev;
       const next = [...prev];
-      const mergedContent = next[index].content + '\n' + next[index + 1].content;
+      // 合并时确保中间有一个换行，并清理多余空白
+      const mergedContent = next[index].content.trim() + '\n' + next[index + 1].content.trim();
       next[index] = { ...next[index], content: mergedContent };
       next.splice(index + 1, 1);
       setIsDirty(true);
@@ -418,9 +429,14 @@ function App() {
   }, []);
 
   // 当 blocks 变化时同步更新全量内容（用于导出和字符统计）
+  // 强制块与块之间保持一个空行 ( \n\n )
   useEffect(() => {
     if (markdownBlocks.length > 0) {
-      const newContent = markdownBlocks.map(b => b.content).join('\n');
+      const newContent = markdownBlocks
+        .map(b => b.content.trim())
+        .filter(content => content !== '')
+        .join('\n\n');
+        
       if (newContent !== markdownContent) {
         setMarkdownContent(newContent);
       }
@@ -688,6 +704,32 @@ function App() {
     }
   }, [markdownContent, currentFile, showSuccessToast, showErrorToast]);
 
+  // 格式化 Markdown
+  const handleFormatMarkdown = useCallback(() => {
+    if (markdownBlocks.length === 0) return;
+
+    // 1. 过滤掉内容为空的块
+    const nonEmptyBlocks = markdownBlocks.filter(block => block.content.trim() !== '');
+    
+    if (nonEmptyBlocks.length === 0) {
+      setMarkdownBlocks([]);
+      setMarkdownContent('');
+      setIsDirty(true);
+      return;
+    }
+
+    // 2. 将内容重新组合，确保每个块之间有且仅有一个空行
+    const formattedContent = nonEmptyBlocks.map(block => block.content.trim()).join('\n\n');
+    
+    // 3. 重新解析为块
+    const newBlocks = parseMarkdownToBlocks(formattedContent);
+    
+    setMarkdownBlocks(newBlocks);
+    setMarkdownContent(formattedContent);
+    setIsDirty(true);
+    showSuccessToast('已完成格式化：块间已统一空行并清理空块');
+  }, [markdownBlocks, parseMarkdownToBlocks, showSuccessToast]);
+
   return (
     <FluentProvider theme={isDarkMode ? webDarkTheme : webLightTheme}>
       <div className={styles.root}>
@@ -704,6 +746,14 @@ function App() {
               onClick={handleSelectFile}
             >
               打开
+            </Button>
+            <Button
+              appearance="secondary"
+              icon={<WandRegular />}
+              onClick={handleFormatMarkdown}
+              disabled={!markdownContent}
+            >
+              格式化
             </Button>
             <Button
               appearance="secondary"

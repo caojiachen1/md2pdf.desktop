@@ -43,9 +43,9 @@ dependencies = [
 
 [[package]]
 name = "anyhow"
-version = "1.0.100"
+version = "1.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
 name = "atk"
@@ -1810,9 +1810,11 @@ checksum = "2532096657941c2fea9c289d370a250971c689d4f143798ff67113ec042024a5"
 name = "md2pdf-desktop"
 version = "1.0.0"
 dependencies = [
+ "anyhow",
  "base64 0.21.7",
  "headless_chrome",
  "pulldown-cmark",
+ "regex",
  "serde",
  "serde_json",
  "tauri",

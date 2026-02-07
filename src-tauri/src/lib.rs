@@ -33,15 +33,49 @@ fn read_markdown_file(path: &str) -> Result<String, AppError> {
 /// 将 Markdown 转换为 HTML（用于预览）
 #[tauri::command]
 fn markdown_to_html(markdown: &str) -> String {
+    use regex::Regex;
+
+    // 1. 统一换行符并清理每行末尾的空白
+    let mut content = markdown.replace("\r\n", "\n");
+    
+    // 2. 预处理：确保块级元素之间有空行
+    // 匹配常见的块级元素起始位置，如果前面紧跟非空行，则插入空行
+    // 包含：标题 (#), 列表 (-, *, + 或 数字.), 代码块 (```), 引用 (>), 分割线 (---)
+    let block_patterns = [
+        (Regex::new(r"(?m)^([^\n]+)\n(#+ )").unwrap(), "$1\n\n$2"),       // 标题前
+        (Regex::new(r"(?m)^([^\n]+)\n( {0,3}[-*+]\s+)").unwrap(), "$1\n\n$2"), // 无序列表前
+        (Regex::new(r"(?m)^([^\n]+)\n( {0,3}\d+\.\s+)").unwrap(), "$1\n\n$2"), // 有序列表前
+        (Regex::new(r"(?m)^([^\n]+)\n( {0,3}```)").unwrap(), "$1\n\n$2"),     // 代码块前
+        (Regex::new(r"(?m)^([^\n]+)\n( {0,3}>)").unwrap(), "$1\n\n$2"),       // 引用前
+    ];
+
+    for (re, replacement) in block_patterns.iter() {
+        content = re.replace_all(&content, *replacement).to_string();
+    }
+
+    // 3. 压缩多余空行：将 3 个及以上连续换行替换为 2 个，确保块间最多只有一个空行
+    let re_multi_lines = Regex::new(r"\n{3,}").unwrap();
+    content = re_multi_lines.replace_all(&content, "\n\n").to_string();
+
+    // 4. 去掉纯空白行构成的“空块”
+    let re_empty_block = Regex::new(r"(?m)^\s+$\n").unwrap();
+    content = re_empty_block.replace_all(&content, "").to_string();
+
     let mut options = Options::empty();
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_FOOTNOTES);
     options.insert(Options::ENABLE_TASKLISTS);
 
-    let parser = Parser::new_ext(markdown, options);
+    let parser = Parser::new_ext(&content, options);
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
+    
+    // 5. 清理生成的 HTML 中可能存在的空标签
+    html_output = html_output
+        .replace("<p></p>", "")
+        .replace("<p>\n</p>", "");
+        
     html_output
 }
 
@@ -213,11 +247,14 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         // 生成完整的 HTML 页面
         let full_html = generate_full_html(&html_content, &title);
 
-        // 写入临时文件
-        let temp_path = std::env::temp_dir().join(format!("md2pdf_temp_{}.html", std::process::id()));
-        fs::write(&temp_path, &full_html).map_err(|e| AppError::FileReadError(e))?;
+        // 确定输出路径
+        let output_path_buf = std::path::Path::new(&output_path);
+        let html_path = output_path_buf.with_extension("html");
+
+        // 立即保存 HTML 文件到 PDF 同级目录
+        fs::write(&html_path, &full_html).map_err(|e| AppError::FileReadError(e))?;
         
-        let path_str = temp_path.to_string_lossy().replace("\\", "/");
+        let path_str = html_path.to_string_lossy().replace("\\", "/");
         let data_url = if path_str.starts_with('/') {
             format!("file://{}", path_str)
         } else {
@@ -228,7 +265,13 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         let launch_options = LaunchOptions::default_builder()
             .headless(true)
             .sandbox(false)
-            // 移除超时限制
+            // 添加稳定性参数，防止大文件渲染时崩溃
+            .args(vec![
+                std::ffi::OsStr::new("--disable-gpu"),
+                std::ffi::OsStr::new("--disable-dev-shm-usage"),
+                std::ffi::OsStr::new("--no-sandbox"),
+                std::ffi::OsStr::new("--disable-setuid-sandbox"),
+            ])
             .build()
             .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
@@ -246,12 +289,33 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         tab.navigate_to(&data_url)
             .map_err(|e| AppError::BrowserError(format!("导航触发失败: {}", e)))?;
 
-        // 彻底去掉库的事件等待，改用固定睡眠
-        // 对于大文件，我们给足 5-10 秒的渲染时间，这在后台执行是可以接受的
-        std::thread::sleep(Duration::from_secs(5));
+        // 移除严格的超时限制，允许等待极长时间（1小时），确保大文件有足够时间渲染
+        let nav_timeout = Duration::from_secs(3600);
+        
+        // 根据内容长度动态调整渲染等待时间
+        let content_len = full_html.len();
+        let (render_wait, retry_wait) = if content_len <= 200_000 {
+            (Duration::from_secs(2), Duration::from_secs(3))
+        } else if content_len <= 800_000 {
+            (Duration::from_secs(6), Duration::from_secs(6))
+        } else if content_len <= 2_000_000 {
+            (Duration::from_secs(12), Duration::from_secs(10))
+        } else {
+            // 对于超大文件，给予更多的基础排版时间
+            (Duration::from_secs(30), Duration::from_secs(20))
+        };
+
+        tab.set_default_timeout(nav_timeout);
+        tab.wait_until_navigated()
+            .map_err(|e| AppError::BrowserError(format!("等待导航完成失败: {}", e)))?;
+        tab.wait_for_element_with_custom_timeout("body", nav_timeout)
+            .map_err(|e| AppError::BrowserError(format!("等待页面渲染失败: {}", e)))?;
+
+        // 给浏览器最后的排版时间，避免大文档尚未完全布局
+        std::thread::sleep(render_wait);
 
         // 生成 PDF
-        let pdf_options = headless_chrome::types::PrintToPdfOptions {
+        let make_pdf_options = || headless_chrome::types::PrintToPdfOptions {
             landscape: Some(false),
             display_header_footer: Some(false),
             print_background: Some(true),
@@ -266,16 +330,35 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
             ..Default::default()
         };
 
-        let pdf_data = tab
-            .print_to_pdf(Some(pdf_options))
-            .map_err(|e| AppError::PdfError(format!("PDF 生成失败 (可能是文档过大渲染未完成): {}", e)))?;
+        let mut last_err: Option<anyhow::Error> = None;
+        let mut pdf_data: Option<Vec<u8>> = None;
+
+        for attempt in 0..3 {
+            match tab.print_to_pdf(Some(make_pdf_options())) {
+                Ok(data) => {
+                    pdf_data = Some(data);
+                    break;
+                }
+                Err(e) => {
+                    last_err = Some(e);
+                    let extra_wait = Duration::from_secs((attempt as u64) * 2);
+                    std::thread::sleep(retry_wait + extra_wait);
+                }
+            }
+        }
+
+        let pdf_data = pdf_data.ok_or_else(|| {
+            AppError::PdfError(format!(
+                "PDF 生成失败 (已保存 HTML 备份至 {:?}): {}",
+                html_path.file_name().unwrap_or_default(),
+                last_err
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "未知错误".to_string())
+            ))
+        })?;
 
         // 写入文件
-        let output_path_buf = std::path::Path::new(&output_path);
         fs::write(output_path_buf, pdf_data).map_err(|e| AppError::FileReadError(e))?;
-
-        // 清理临时文件
-        let _ = fs::remove_file(temp_path);
 
         Ok(())
     }).await.map_err(|e| AppError::PdfError(e.to_string()))?

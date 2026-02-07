@@ -23,6 +23,8 @@ headless_chrome = "1.0"
 tokio = { version = "1", features = ["full"] }
 thiserror = "1"
 base64 = "0.21"
+anyhow = "1.0.101"
+regex = "1.12.3"
 
 [features]
 default = ["custom-protocol"]
