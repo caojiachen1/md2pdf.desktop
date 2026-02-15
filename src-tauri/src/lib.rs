@@ -1,8 +1,19 @@
+use comrak::{Arena, format_commonmark, nodes::NodeValue, parse_document, Options as ComrakOptions};
 use headless_chrome::{Browser, LaunchOptions};
 use pulldown_cmark::{html, Options, Parser};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
 use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MarkdownBlock {
+    pub id: String,
+    pub content: String,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub block_type: String,
+}
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -28,6 +39,201 @@ impl serde::Serialize for AppError {
 fn read_markdown_file(path: &str) -> Result<String, AppError> {
     let content = fs::read_to_string(path)?;
     Ok(content)
+}
+
+fn get_comrak_options() -> ComrakOptions<'static> {
+    let mut options = ComrakOptions::default();
+    options.extension.strikethrough = true;
+    options.extension.table = true;
+    options.extension.autolink = true;
+    options.extension.tasklist = true;
+    options.extension.footnotes = true;
+    options.extension.math_dollars = true;
+    options.extension.math_code = true;
+    options.extension.front_matter_delimiter = Some("---".to_string());
+    options.parse.smart = true;
+    options.render.hardbreaks = false;
+    options.render.github_pre_lang = true;
+    options.render.width = 0;
+    options
+}
+
+#[tauri::command]
+fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
+    let content = markdown.replace("\r\n", "\n");
+    let lines: Vec<&str> = content.lines().collect();
+    let arena = Arena::new();
+    let options = get_comrak_options();
+    
+    let root = parse_document(&arena, &content, &options);
+    
+    let mut blocks: Vec<MarkdownBlock> = Vec::new();
+    let mut block_index = 0;
+    
+    fn is_container(node_value: &NodeValue) -> bool {
+        matches!(node_value, 
+            NodeValue::Document | 
+            NodeValue::List(_) | 
+            NodeValue::Item(_) | 
+            NodeValue::BlockQuote
+        )
+    }
+    
+    fn is_complex(node_value: &NodeValue) -> bool {
+        matches!(node_value,
+            NodeValue::Table(_) |
+            NodeValue::CodeBlock(_) |
+            NodeValue::Math(_) |
+            NodeValue::HtmlBlock(_) |
+            NodeValue::ThematicBreak |
+            NodeValue::FootnoteDefinition(_)
+        )
+    }
+    
+    fn get_block_type(node_value: &NodeValue) -> String {
+        match node_value {
+            NodeValue::Heading(_) => "heading".to_string(),
+            NodeValue::Paragraph => "paragraph".to_string(),
+            NodeValue::CodeBlock(_) => "code".to_string(),
+            NodeValue::Table(_) => "table".to_string(),
+            NodeValue::Math(_) => "math".to_string(),
+            NodeValue::HtmlBlock(_) => "html".to_string(),
+            NodeValue::List(_) => "list".to_string(),
+            NodeValue::Item(_) => "listItem".to_string(),
+            NodeValue::BlockQuote => "blockquote".to_string(),
+            NodeValue::ThematicBreak => "thematicBreak".to_string(),
+            NodeValue::FootnoteDefinition(_) => "footnoteDefinition".to_string(),
+            NodeValue::Image(_) => "image".to_string(),
+            _ => "other".to_string(),
+        }
+    }
+    
+    fn collect_atom_nodes<'a>(
+        node: &'a comrak::nodes::AstNode<'a>,
+        lines: &[&str],
+        blocks: &mut Vec<MarkdownBlock>,
+        block_index: &mut usize,
+    ) {
+        let node_data = node.data.borrow();
+        let node_value = &node_data.value;
+        
+        if is_container(node_value) {
+            for child in node.children() {
+                collect_atom_nodes(child, lines, blocks, block_index);
+            }
+        } else if is_complex(node_value) {
+            let sourcepos = node_data.sourcepos;
+            let start_line = sourcepos.start.line;
+            let end_line = sourcepos.end.line;
+            
+            if start_line > 0 && end_line >= start_line {
+                let content = lines.get(start_line - 1..end_line)
+                    .map(|l| l.join("\n"))
+                    .unwrap_or_default();
+                
+                if !content.trim().is_empty() {
+                    blocks.push(MarkdownBlock {
+                        id: format!("block-{}-{}", block_index, start_line),
+                        content,
+                        start_line,
+                        end_line,
+                        block_type: get_block_type(node_value),
+                    });
+                    *block_index += 1;
+                }
+            }
+        } else {
+            let sourcepos = node_data.sourcepos;
+            let start_line = sourcepos.start.line;
+            let end_line = sourcepos.end.line;
+            
+            if start_line > 0 && end_line >= start_line {
+                let is_multiline = end_line > start_line;
+                let is_text_block = matches!(node_value, NodeValue::Paragraph | NodeValue::Heading(_));
+                
+                if is_multiline && is_text_block {
+                    for line_num in start_line..=end_line {
+                        if let Some(&line_content) = lines.get(line_num - 1) {
+                            if !line_content.trim().is_empty() {
+                                blocks.push(MarkdownBlock {
+                                    id: format!("block-{}-{}", block_index, line_num),
+                                    content: line_content.to_string(),
+                                    start_line: line_num,
+                                    end_line: line_num,
+                                    block_type: "line".to_string(),
+                                });
+                                *block_index += 1;
+                            }
+                        }
+                    }
+                } else {
+                    let content = lines.get(start_line - 1..end_line)
+                        .map(|l| l.join("\n"))
+                        .unwrap_or_default();
+                    
+                    if !content.trim().is_empty() {
+                        blocks.push(MarkdownBlock {
+                            id: format!("block-{}-{}", block_index, start_line),
+                            content,
+                            start_line,
+                            end_line,
+                            block_type: get_block_type(node_value),
+                        });
+                        *block_index += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    for node in root.children() {
+        collect_atom_nodes(node, &lines, &mut blocks, &mut block_index);
+    }
+    
+    blocks.sort_by(|a, b| a.start_line.cmp(&b.start_line));
+    
+    blocks
+}
+
+#[tauri::command]
+fn format_markdown(markdown: &str) -> String {
+    let content = markdown.replace("\r\n", "\n");
+    let arena = Arena::new();
+    let options = get_comrak_options();
+    
+    let root = parse_document(&arena, &content, &options);
+    
+    let mut formatted: Vec<u8> = Vec::new();
+    if let Err(e) = format_commonmark(root, &options, &mut formatted) {
+        eprintln!("格式化错误: {}", e);
+        return markdown.to_string();
+    }
+    
+    let formatted = String::from_utf8_lossy(&formatted).to_string();
+    
+    let lines: Vec<&str> = formatted.lines().collect();
+    let mut result = String::new();
+    let mut prev_was_empty = true;
+    
+    for line in lines {
+        let is_empty = line.trim().is_empty();
+        
+        if is_empty {
+            if !prev_was_empty {
+                result.push('\n');
+            }
+            prev_was_empty = true;
+        } else {
+            if !result.is_empty() && !prev_was_empty {
+                result.push('\n');
+            }
+            result.push_str(line);
+            result.push('\n');
+            prev_was_empty = false;
+        }
+    }
+    
+    result.trim_end().to_string() + "\n"
 }
 
 /// 将 Markdown 转换为 HTML（用于预览）
@@ -372,7 +578,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             read_markdown_file,
             markdown_to_html,
-            export_to_pdf
+            export_to_pdf,
+            parse_markdown_blocks,
+            format_markdown
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
