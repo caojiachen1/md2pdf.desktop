@@ -963,7 +963,6 @@ function App() {
   const handleFormatMarkdown = useCallback(() => {
     if (markdownBlocks.length === 0) return;
 
-    // 1. 过滤掉内容为空的块
     const nonEmptyBlocks = markdownBlocks.filter(block => block.content.trim() !== '');
     
     if (nonEmptyBlocks.length === 0) {
@@ -973,10 +972,34 @@ function App() {
       return;
     }
 
-    // 2. 将内容重新组合，确保每个块之间有且仅有一个空行
-    const formattedContent = nonEmptyBlocks.map(block => block.content.trim()).join('\n\n');
+    let formattedContent = nonEmptyBlocks.map(block => block.content.trim()).join('\n\n');
+
+    formattedContent = formattedContent.replace(/\$\$([^\$\n]+?)\$\$/g, '\n\n$$$$\n$1\n$$$$\n\n');
+
+    const lines = formattedContent.split('\n');
+    let inFormula = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trim() === '$$') {
+        if (!inFormula) {
+          if (i > 0 && lines[i - 1].trim() !== '') {
+            lines.splice(i, 0, '');
+            i++;
+          }
+          inFormula = true;
+        } else {
+          if (i < lines.length - 1 && lines[i + 1].trim() !== '') {
+            lines.splice(i + 1, 0, '');
+          }
+          inFormula = false;
+        }
+      }
+    }
+    formattedContent = lines.join('\n');
+
+    formattedContent = formattedContent.replace(/\n{3,}/g, '\n\n');
+
+    formattedContent = formattedContent.trim();
     
-    // 3. 重新解析为块
     const newBlocks = parseMarkdownToBlocks(formattedContent);
     
     setMarkdownBlocks(newBlocks);
