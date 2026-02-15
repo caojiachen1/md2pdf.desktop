@@ -960,8 +960,12 @@ function App() {
   }, [markdownContent, currentFile, showSuccessToast, showErrorToast]);
 
   // 格式化 Markdown
-  const handleFormatMarkdown = useCallback(() => {
+  const handleFormatMarkdown = useCallback(async () => {
     if (markdownBlocks.length === 0) return;
+
+    setIsLoading(true);
+    setLoadingMessage('正在格式化...');
+    await new Promise(resolve => setTimeout(resolve, 10));
 
     const nonEmptyBlocks = markdownBlocks.filter(block => block.content.trim() !== '');
     
@@ -969,6 +973,7 @@ function App() {
       setMarkdownBlocks([]);
       setMarkdownContent('');
       setIsDirty(true);
+      setIsLoading(false);
       return;
     }
 
@@ -1005,6 +1010,7 @@ function App() {
     setMarkdownBlocks(newBlocks);
     setMarkdownContent(formattedContent);
     setIsDirty(true);
+    setIsLoading(false);
     showSuccessToast('已完成格式化：块间已统一空行并清理空块');
   }, [markdownBlocks, parseMarkdownToBlocks, showSuccessToast]);
 
