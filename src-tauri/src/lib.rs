@@ -303,7 +303,7 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
         }}
 
         body {{
-            font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, -apple-system, sans-serif;
+            font-family: 'SimSun', '宋体', 'Segoe UI', system-ui, -apple-system, sans-serif;
             line-height: 1.7;
             color: #1a1a1a;
             max-width: 800px;

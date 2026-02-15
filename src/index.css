@@ -11,7 +11,7 @@ html, body, #root {
 }
 
 body {
-  font-family: 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'SimSun', '宋体', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -29,6 +29,7 @@ body {
 
 /* Markdown 预览样式 */
 .markdown-preview {
+  font-family: 'SimSun', '宋体', 'Segoe UI Variable', 'Segoe UI', system-ui, -apple-system, sans-serif;
   line-height: 1.7;
   color: inherit;
 }
