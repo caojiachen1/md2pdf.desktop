@@ -32,6 +32,7 @@ import {
   WandRegular,
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import ReactMarkdown from 'react-markdown';
@@ -330,6 +331,20 @@ function App() {
   const styles = useStyles();
   const toasterId = useId('toaster');
   const { dispatchToast } = useToastController(toasterId);
+
+  // 监听导出进度
+  useEffect(() => {
+    let unlisten: any;
+    const setup = async () => {
+      unlisten = await listen<{ message: string }>('export-progress', (event) => {
+        setLoadingMessage(event.payload.message);
+      });
+    };
+    setup();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   // 解析 Markdown 内容为分块
   const parseMarkdownToBlocks = useCallback(async (content: string): Promise<MarkdownBlock[]> => {

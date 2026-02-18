@@ -4,6 +4,7 @@ use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
+use tauri::Emitter;
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13,6 +14,11 @@ pub struct MarkdownBlock {
     pub start_line: usize,
     pub end_line: usize,
     pub block_type: String,
+}
+
+#[derive(Serialize, Clone)]
+struct ProgressPayload {
+    message: String,
 }
 
 #[derive(Error, Debug)]
@@ -666,9 +672,13 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
 
 /// 导出为 PDF
 #[tauri::command]
-async fn export_to_pdf(html_content: String, output_path: String, title: String) -> Result<(), AppError> {
+async fn export_to_pdf(window: tauri::Window, html_content: String, output_path: String, title: String) -> Result<(), AppError> {
     // 在后台线程中执行，避免阻塞
     tokio::task::spawn_blocking(move || {
+        let emit_progress = |message: &str| {
+            let _ = window.emit("export-progress", ProgressPayload { message: message.to_string() });
+        };
+
         // 生成完整的 HTML 页面
         let full_html = generate_full_html(&html_content, &title);
 
@@ -685,6 +695,8 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         } else {
             format!("file:///{}", path_str)
         };
+
+        emit_progress("[1/5] 正在启动浏览器 (Headless Chrome)...");
 
         // 配置浏览器启动选项
         let launch_options = LaunchOptions::default_builder()
@@ -709,10 +721,14 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         let browser = Browser::new(launch_options)
             .map_err(|e| AppError::BrowserError(e.to_string()))?;
 
+        emit_progress("[2/5] 正在创建新标签页...");
+
         // 创建新标签页
         let tab = browser
             .new_tab()
             .map_err(|e| AppError::BrowserError(e.to_string()))?;
+
+        emit_progress(&format!("[3/5] 正在加载页面..."));
 
         // 导航到 HTML 页面
         // 触发导航
@@ -726,9 +742,13 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         tab.wait_until_navigated()
             .map_err(|e| AppError::BrowserError(format!("等待导航完成失败: {}", e)))?;
         
+        emit_progress("[4/5] 正在等待数学公式动态渲染完成...");
+
         // 等待页面完全渲染完成（前端脚本会添加 #render-complete 元素作为信号）
         tab.wait_for_element_with_custom_timeout("#render-complete", nav_timeout)
             .map_err(|e| AppError::BrowserError(format!("等待渲染完成信号超时: {}", e)))?;
+
+        emit_progress("[5/5] 正在生成 PDF...");
 
         // 生成 PDF
         let make_pdf_options = || headless_chrome::types::PrintToPdfOptions {
@@ -776,6 +796,9 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
 
         // 写入文件
         fs::write(output_path_buf, pdf_data).map_err(|e| AppError::FileReadError(e))?;
+
+        // Clean up temp HTML
+        let _ = fs::remove_file(&html_path);
 
         Ok(())
     }).await.map_err(|e| AppError::PdfError(e.to_string()))?
