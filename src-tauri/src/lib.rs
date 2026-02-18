@@ -637,6 +637,21 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
             }}
         }}
     </style>
+    <script>
+        // 当页面完全加载并渲染完成后，添加一个带有 ID 的哨兵元素
+        // 这样后端 headless_chrome 就可以精准等待，而不用固定的 sleep
+        window.addEventListener('load', () => {{
+            // 使用 double requestAnimationFrame 确保至少进行了一次完整的布局和绘制
+            requestAnimationFrame(() => {{
+                requestAnimationFrame(() => {{
+                    const sentinel = document.createElement('div');
+                    sentinel.id = 'render-complete';
+                    sentinel.style.display = 'none';
+                    document.body.appendChild(sentinel);
+                }});
+            }});
+        }});
+    </script>
 </head>
 <body>
     <div class="markdown-preview">
@@ -675,12 +690,17 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         let launch_options = LaunchOptions::default_builder()
             .headless(true)
             .sandbox(false)
-            // 添加稳定性参数，防止大文件渲染时崩溃
+            .idle_browser_timeout(std::time::Duration::from_secs(3600 * 24 * 365 * 100))
             .args(vec![
-                std::ffi::OsStr::new("--disable-gpu"),
-                std::ffi::OsStr::new("--disable-dev-shm-usage"),
                 std::ffi::OsStr::new("--no-sandbox"),
                 std::ffi::OsStr::new("--disable-setuid-sandbox"),
+                std::ffi::OsStr::new("--disable-dev-shm-usage"),
+                std::ffi::OsStr::new("--disable-extensions"),
+                std::ffi::OsStr::new("--disable-gpu"),
+                std::ffi::OsStr::new("--disable-background-timer-throttling"),
+                std::ffi::OsStr::new("--disable-renderer-backgrounding"),
+                std::ffi::OsStr::new("--disable-backgrounding-occluded-windows"),
+                std::ffi::OsStr::new("--disable-hang-monitor"),
             ])
             .build()
             .map_err(|e| AppError::BrowserError(e.to_string()))?;
@@ -702,27 +722,13 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
         // 移除严格的超时限制，允许等待极长时间（1小时），确保大文件有足够时间渲染
         let nav_timeout = Duration::from_secs(3600);
         
-        // 根据内容长度动态调整渲染等待时间
-        let content_len = full_html.len();
-        let (render_wait, retry_wait) = if content_len <= 200_000 {
-            (Duration::from_secs(2), Duration::from_secs(3))
-        } else if content_len <= 800_000 {
-            (Duration::from_secs(6), Duration::from_secs(6))
-        } else if content_len <= 2_000_000 {
-            (Duration::from_secs(12), Duration::from_secs(10))
-        } else {
-            // 对于超大文件，给予更多的基础排版时间
-            (Duration::from_secs(30), Duration::from_secs(20))
-        };
-
         tab.set_default_timeout(nav_timeout);
         tab.wait_until_navigated()
             .map_err(|e| AppError::BrowserError(format!("等待导航完成失败: {}", e)))?;
-        tab.wait_for_element_with_custom_timeout("body", nav_timeout)
-            .map_err(|e| AppError::BrowserError(format!("等待页面渲染失败: {}", e)))?;
-
-        // 给浏览器最后的排版时间，避免大文档尚未完全布局
-        std::thread::sleep(render_wait);
+        
+        // 等待页面完全渲染完成（前端脚本会添加 #render-complete 元素作为信号）
+        tab.wait_for_element_with_custom_timeout("#render-complete", nav_timeout)
+            .map_err(|e| AppError::BrowserError(format!("等待渲染完成信号超时: {}", e)))?;
 
         // 生成 PDF
         let make_pdf_options = || headless_chrome::types::PrintToPdfOptions {
@@ -751,8 +757,9 @@ async fn export_to_pdf(html_content: String, output_path: String, title: String)
                 }
                 Err(e) => {
                     last_err = Some(e);
-                    let extra_wait = Duration::from_secs((attempt as u64) * 2);
-                    std::thread::sleep(retry_wait + extra_wait);
+                    // 如果依然失败，进行重试并给一点基础时间
+                    let extra_wait = Duration::from_secs((attempt as u64) * 2 + 3);
+                    std::thread::sleep(extra_wait);
                 }
             }
         }
