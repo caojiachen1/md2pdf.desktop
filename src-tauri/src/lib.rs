@@ -390,7 +390,7 @@ fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
     blocks
 }
 
-/// 格式化 Markdown 文本：与 TS handleFormatMarkdown 核心逻辑一致。
+/// 格式化 Markdown 文本：
 /// 步骤：
 ///  1. 统一换行符
 ///  2. 将单行 $$公式$$ 展开为独立的块级公式（多行格式）
@@ -404,7 +404,6 @@ fn format_markdown(markdown: &str) -> String {
     let mut content = markdown.replace("\r\n", "\n");
 
     // 步骤 2：将单行 $$公式$$ 展开为多行块级公式
-    // 对应 TS: formattedContent.replace(/\$\$([^\$\n]+?)\$\$/g, '\n\n$$\n$1\n$$\n\n')
     let re_inline_block = Regex::new(r"\$\$([^\$\n]+?)\$\$").unwrap();
     content = re_inline_block.replace_all(&content, "\n\n$$\n$1\n$$\n\n").to_string();
 
