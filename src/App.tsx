@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+﻿import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   FluentProvider,
   webLightTheme,
@@ -332,306 +332,17 @@ function App() {
   const { dispatchToast } = useToastController(toasterId);
 
   // 解析 Markdown 内容为分块
-  const parseMarkdownToBlocks = useCallback((content: string): MarkdownBlock[] => {
+  const parseMarkdownToBlocks = useCallback(async (content: string): Promise<MarkdownBlock[]> => {
     if (!content) return [];
-    
-    // 使用与预览相同的插件，确保解析结构一致
-    const processor = unified()
-      .use(remarkParse)
-      .use(remarkGfm)
-      .use(remarkMath);
-    const ast = processor.parse(content);
-    const lines = content.split(/\r?\n/);
-    const blocks: MarkdownBlock[] = [];
-
-    // 辅助函数：将一个范围内的行拆分为分块，但保持 $$...$$ 块级公式完整
-    const splitLinesWithMath = (startLine: number, endLine: number): any[] => {
-      const result: any[] = [];
-      let current = startLine;
-      
-      while (current <= endLine) {
-        const lineContent = lines[current - 1] || '';
-        
-        // 检查是否是块级公式的开始（以 $$ 开头）
-        if (lineContent.trim().startsWith('$$')) {
-          let j = current;
-          // 如果这一行本身就包含了结束符（且不是只有两个$），则它是一个单行块级公式
-          let foundEnd = lineContent.trim().length > 2 && lineContent.trim().endsWith('$$') && lineContent.trim() !== '$$';
-          
-          if (!foundEnd) {
-            j = current + 1;
-            while (j <= endLine) {
-              if (lines[j - 1].trim().endsWith('$$')) {
-                foundEnd = true;
-                break;
-              }
-              j++;
-            }
-          }
-          
-          if (foundEnd) {
-            result.push({
-              type: 'math',
-              position: {
-                start: { line: current, column: 1 },
-                end: { line: j, column: 1 }
-              }
-            });
-            current = j + 1;
-            continue;
-          }
-        }
-        
-        // 普通行
-        result.push({
-          type: 'line',
-          position: {
-            start: { line: current, column: 1 },
-            end: { line: current, column: 1 }
-          }
-        });
-        current++;
-      }
-      return result;
-    };
-    
-    // 递归获取所有需要作为独立分块的原子节点
-    const getAtomNodes = (nodes: any[]): any[] => {
-      let atoms: any[] = [];
-      if (!nodes) return atoms;
-
-      nodes.forEach(node => {
-        // 容器类型：继续递归以获取更细的分块
-        const containerTypes = ['root', 'list', 'listItem', 'blockquote'];
-        // 不可拆分的复杂块：这些必须作为一个整体，否则会破坏 Markdown 语法
-        const complexTypes = ['table', 'code', 'html', 'math', 'yaml', 'toml', 'footnoteDefinition', 'thematicBreak'];
-        
-        if (containerTypes.includes(node.type) && node.children) {
-          atoms = atoms.concat(getAtomNodes(node.children));
-        } else if (complexTypes.includes(node.type)) {
-          atoms.push(node);
-        } else {
-          // 对于 paragraph, heading 等“文本类块”，我们将其进一步拆分
-          if (node.position) {
-            const startLine = node.position.start.line;
-            const endLine = node.position.end.line;
-            
-            if (startLine < endLine && (node.type === 'paragraph' || node.type === 'heading')) {
-              atoms = atoms.concat(splitLinesWithMath(startLine, endLine));
-            } else {
-              atoms.push(node);
-            }
-          } else {
-            atoms.push(node);
-          }
-        }
-      });
-      return atoms;
-    };
-
-    const children = (ast as any).children;
-    let atomNodes = getAtomNodes(children)
-      .filter(node => node.position)
-      .sort((a, b) => {
-        if (a.position.start.line !== b.position.start.line) {
-          return a.position.start.line - b.position.start.line;
-        }
-        return a.position.end.line - b.position.end.line;
-      });
-
-    // 强制拆分 HTML 块中的表格，确保 <table>...</table> 是独立的
-    const refinedAtomNodes: any[] = [];
-    for (const node of atomNodes) {
-      if (node.type === 'html' && node.position) {
-        const startLine = node.position.start.line;
-        const endLine = node.position.end.line;
-        const nodeLines = lines.slice(startLine - 1, endLine);
-        
-        // 检查是否包含表格标签，如果不包含则不进行特殊处理
-        const fullContent = nodeLines.join('\n');
-        if (!fullContent.includes('<table') && !fullContent.includes('</table>')) {
-          refinedAtomNodes.push(node);
-          continue;
-        }
-
-        let currentStart = 0;
-        for (let k = 0; k < nodeLines.length; k++) {
-          const line = nodeLines[k];
-          // 如果某行包含 <table (通常是表格开始)
-          if (k > currentStart && line.trim().match(/^<table[>\s]/i)) {
-            // 将表格之前的内容拆分为行，以便能够正常处理其中的 markdown/latex
-            const splitNodes = splitLinesWithMath(startLine + currentStart, startLine + k - 1);
-            refinedAtomNodes.push(...splitNodes);
-            currentStart = k;
-          }
-          
-          // 如果某行包含 </table> (表格结束) 且后面还有内容，则在这一行之后拆分
-          if (line.includes('</table>') && k < nodeLines.length - 1) {
-            // 将 </table> 之前（含）的内容作为 HTML 块推入
-            refinedAtomNodes.push({
-              ...node,
-              position: {
-                start: { line: startLine + currentStart },
-                end: { line: startLine + k }
-              }
-            });
-            currentStart = k + 1;
-          }
-        }
-        
-        if (startLine + currentStart <= endLine) {
-          const remStart = startLine + currentStart;
-          const remEnd = endLine;
-          const remainingContent = nodeLines.slice(currentStart).join('\n');
-          // 如果剩余部分不再包含表格标签（即它是表格后的普通文字），则尝试按 math 规则拆分
-          if (!remainingContent.includes('<table') && !remainingContent.includes('</table>')) {
-            const splitNodes = splitLinesWithMath(remStart, remEnd);
-            refinedAtomNodes.push(...splitNodes);
-          } else {
-            refinedAtomNodes.push({
-              ...node,
-              position: {
-                start: { line: remStart },
-                end: { line: remEnd }
-              }
-            });
-          }
-        }
-      } else {
-        refinedAtomNodes.push(node);
-      }
-    }
-    atomNodes = refinedAtomNodes;
-
-    // 合并 HTML 表格节点（只合并 <table>...</table> 之间的内容）
-    const mergedNodes: any[] = [];
-    let i = 0;
-
-    while (i < atomNodes.length) {
-      const node = atomNodes[i];
-
-      if (node.type === 'html') {
-        // 获取当前HTML节点的内容
-        const nodeContent = lines.slice(node.position.start.line - 1, node.position.end.line).join('\n');
-
-        // 检查是否是表格开始标签
-        if (nodeContent.trim().match(/^<table[>\s]/i)) {
-          // 找到表格开始，收集到 </table> 为止的所有HTML节点
-          let lastLine = node.position.end.line;
-          let j = i + 1;
-          let foundTableEnd = nodeContent.includes('</table>');
-
-          while (!foundTableEnd && j < atomNodes.length && atomNodes[j].type === 'html') {
-            // 检查是否连续（中间允许有空行）
-            if (atomNodes[j].position.start.line <= lastLine + 2) {
-              const nextContent = lines.slice(atomNodes[j].position.start.line - 1, atomNodes[j].position.end.line).join('\n');
-              lastLine = atomNodes[j].position.end.line;
-
-              // 检查是否包含表格结束标签
-              if (nextContent.includes('</table>')) {
-                foundTableEnd = true;
-              }
-              j++;
-            } else {
-              break;
-            }
-          }
-
-          // 合并表格节点
-          if (foundTableEnd && j > i + 1) {
-            mergedNodes.push({
-              type: 'html',
-              position: {
-                start: { line: node.position.start.line },
-                end: { line: lastLine }
-              }
-            });
-            i = j;
-          } else {
-            // 没有找到完整的表格，保持原节点
-            mergedNodes.push(node);
-            i++;
-          }
-        } else {
-          // 不是表格开始标签，不合并
-          mergedNodes.push(node);
-          i++;
-        }
-      } else {
-        mergedNodes.push(node);
-        i++;
-      }
-    }
-
-    atomNodes = mergedNodes;
-
-    // 调试：打印节点信息
-    console.log('Parsed AST nodes:', atomNodes.map(n => ({
-      type: n.type,
-      lines: `${n.position.start.line}-${n.position.end.line}`,
-      preview: content.split(/\r?\n/).slice(n.position.start.line - 1, n.position.end.line).join('\\n').substring(0, 50)
-    })));
-
-    let lastLineProcessed = 0; // 0-indexed
-
-    atomNodes.forEach((node: any, idx: number) => {
-      const startLine = node.position.start.line; // 1-indexed
-      const endLine = node.position.end.line;     // 1-indexed
-
-      // 填充节点之前的空白行或未识别行（使用 math 敏感的拆分逻辑）
-      if (startLine - 1 > lastLineProcessed) {
-        const gapNodes = splitLinesWithMath(lastLineProcessed + 1, startLine - 1);
-        gapNodes.forEach((node, gidx) => {
-          const content = lines.slice(node.position.start.line - 1, node.position.end.line).join('\n');
-          if (content.trim() !== '') {
-            blocks.push({
-              id: `gap-${node.position.start.line}-${gidx}`,
-              content: content,
-              startLine: node.position.start.line,
-              endLine: node.position.end.line
-            });
-          }
-        });
-        lastLineProcessed = startLine - 1;
-      }
-
-      // 添加节点本身
-      // 确保不与已处理的行重叠（处理某些 AST 节点可能存在的行重叠）
-      const actualStartLine = Math.max(startLine, lastLineProcessed + 1);
-      if (endLine >= actualStartLine) {
-        const blockContent = lines.slice(actualStartLine - 1, endLine).join('\n');
-        // 只有非空内容才添加为块
-        if (blockContent.trim() !== '') {
-          blocks.push({
-            id: `block-${idx}-${actualStartLine}`,
-            content: blockContent,
-            startLine: actualStartLine,
-            endLine
-          });
-        }
-        lastLineProcessed = endLine;
-      }
-    });
-
-    // 处理文件末尾的剩余行
-    if (lastLineProcessed < lines.length) {
-      const gapNodes = splitLinesWithMath(lastLineProcessed + 1, lines.length);
-      gapNodes.forEach((node, gidx) => {
-        const content = lines.slice(node.position.start.line - 1, node.position.end.line).join('\n');
-        if (content.trim() !== '') {
-          blocks.push({
-            id: `gap-end-${node.position.start.line}-${gidx}`,
-            content: content,
-            startLine: node.position.start.line,
-            endLine: node.position.end.line
-          });
-        }
-      });
-    }
-
-    return blocks;
+    type RustBlock = { id: string; content: string; start_line: number; end_line: number; block_type: string };
+    const rustBlocks = await invoke<RustBlock[]>('parse_markdown_blocks', { markdown: content });
+    return rustBlocks.map(b => ({
+      id: b.id,
+      content: b.content,
+      startLine: b.start_line,
+      endLine: b.end_line,
+    }));
   }, []);
-  
   // 虚拟列表引用
   const leftVirtuosoRef = useRef<any>(null);
   const rightVirtuosoRef = useRef<any>(null);
@@ -825,7 +536,7 @@ function App() {
         setLoadingMessage('正在解析文档结构...');
         await new Promise(resolve => setTimeout(resolve, 10));
 
-        const blocks = parseMarkdownToBlocks(content);
+        const blocks = await parseMarkdownToBlocks(content);
         setMarkdownBlocks(blocks);
         
         setCurrentFile(selected as string);
@@ -898,7 +609,7 @@ function App() {
       const content = await invoke<string>('read_markdown_file', { path: currentFile });
       setMarkdownContent(content);
 
-      const blocks = parseMarkdownToBlocks(content);
+      const blocks = await parseMarkdownToBlocks(content);
       setMarkdownBlocks(blocks);
       
       setIsDirty(false);
@@ -977,35 +688,9 @@ function App() {
       return;
     }
 
-    let formattedContent = nonEmptyBlocks.map(block => block.content.trim()).join('\n\n');
-
-    formattedContent = formattedContent.replace(/\$\$([^\$\n]+?)\$\$/g, '\n\n$$$$\n$1\n$$$$\n\n');
-
-    const lines = formattedContent.split('\n');
-    let inFormula = false;
-    for (let i = 0; i < lines.length; i++) {
-      if (lines[i].trim() === '$$') {
-        if (!inFormula) {
-          if (i > 0 && lines[i - 1].trim() !== '') {
-            lines.splice(i, 0, '');
-            i++;
-          }
-          inFormula = true;
-        } else {
-          if (i < lines.length - 1 && lines[i + 1].trim() !== '') {
-            lines.splice(i + 1, 0, '');
-          }
-          inFormula = false;
-        }
-      }
-    }
-    formattedContent = lines.join('\n');
-
-    formattedContent = formattedContent.replace(/\n{3,}/g, '\n\n');
-
-    formattedContent = formattedContent.trim();
-    
-    const newBlocks = parseMarkdownToBlocks(formattedContent);
+    const combined = nonEmptyBlocks.map(block => block.content.trim()).join('\n\n');
+    const formattedContent = await invoke<string>('format_markdown', { markdown: combined });
+    const newBlocks = await parseMarkdownToBlocks(formattedContent);
     
     setMarkdownBlocks(newBlocks);
     setMarkdownContent(formattedContent);

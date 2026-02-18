@@ -1,4 +1,4 @@
-use comrak::{Arena, format_commonmark, nodes::NodeValue, parse_document, Options as ComrakOptions};
+use comrak::Options as ComrakOptions;
 use headless_chrome::{Browser, LaunchOptions};
 use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
@@ -58,182 +58,387 @@ fn get_comrak_options() -> ComrakOptions<'static> {
     options
 }
 
-#[tauri::command]
-fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
-    let content = markdown.replace("\r\n", "\n");
-    let lines: Vec<&str> = content.lines().collect();
-    let arena = Arena::new();
-    let options = get_comrak_options();
+/// 将一段行范围按 $$...$$ 公式边界拆分，返回 (start_line, end_line) 对（均为 1-indexed）
+fn split_lines_with_math(start_line: usize, end_line: usize, lines: &[&str]) -> Vec<(usize, usize)> {
+    let mut result = Vec::new();
+    let mut current = start_line;
     
-    let root = parse_document(&arena, &content, &options);
-    
-    let mut blocks: Vec<MarkdownBlock> = Vec::new();
-    let mut block_index = 0;
-    
-    fn is_container(node_value: &NodeValue) -> bool {
-        matches!(node_value, 
-            NodeValue::Document | 
-            NodeValue::List(_) | 
-            NodeValue::Item(_) | 
-            NodeValue::BlockQuote
-        )
-    }
-    
-    fn is_complex(node_value: &NodeValue) -> bool {
-        matches!(node_value,
-            NodeValue::Table(_) |
-            NodeValue::CodeBlock(_) |
-            NodeValue::Math(_) |
-            NodeValue::HtmlBlock(_) |
-            NodeValue::ThematicBreak |
-            NodeValue::FootnoteDefinition(_)
-        )
-    }
-    
-    fn get_block_type(node_value: &NodeValue) -> String {
-        match node_value {
-            NodeValue::Heading(_) => "heading".to_string(),
-            NodeValue::Paragraph => "paragraph".to_string(),
-            NodeValue::CodeBlock(_) => "code".to_string(),
-            NodeValue::Table(_) => "table".to_string(),
-            NodeValue::Math(_) => "math".to_string(),
-            NodeValue::HtmlBlock(_) => "html".to_string(),
-            NodeValue::List(_) => "list".to_string(),
-            NodeValue::Item(_) => "listItem".to_string(),
-            NodeValue::BlockQuote => "blockquote".to_string(),
-            NodeValue::ThematicBreak => "thematicBreak".to_string(),
-            NodeValue::FootnoteDefinition(_) => "footnoteDefinition".to_string(),
-            NodeValue::Image(_) => "image".to_string(),
-            _ => "other".to_string(),
-        }
-    }
-    
-    fn collect_atom_nodes<'a>(
-        node: &'a comrak::nodes::AstNode<'a>,
-        lines: &[&str],
-        blocks: &mut Vec<MarkdownBlock>,
-        block_index: &mut usize,
-    ) {
-        let node_data = node.data.borrow();
-        let node_value = &node_data.value;
+    while current <= end_line {
+        let line_content = lines.get(current - 1).copied().unwrap_or("").trim();
         
-        if is_container(node_value) {
-            for child in node.children() {
-                collect_atom_nodes(child, lines, blocks, block_index);
-            }
-        } else if is_complex(node_value) {
-            let sourcepos = node_data.sourcepos;
-            let start_line = sourcepos.start.line;
-            let end_line = sourcepos.end.line;
+        if line_content.starts_with("$$") {
+            // 判断是否是单行块级公式（首尾均有 $$，且不是单独的 $$）
+            let is_single_line = line_content.len() > 2
+                && line_content.ends_with("$$")
+                && line_content != "$$";
             
-            if start_line > 0 && end_line >= start_line {
-                let content = lines.get(start_line - 1..end_line)
-                    .map(|l| l.join("\n"))
-                    .unwrap_or_default();
-                
-                if !content.trim().is_empty() {
-                    blocks.push(MarkdownBlock {
-                        id: format!("block-{}-{}", block_index, start_line),
-                        content,
-                        start_line,
-                        end_line,
-                        block_type: get_block_type(node_value),
-                    });
-                    *block_index += 1;
-                }
+            if is_single_line {
+                result.push((current, current));
+                current += 1;
+                continue;
             }
-        } else {
-            let sourcepos = node_data.sourcepos;
-            let start_line = sourcepos.start.line;
-            let end_line = sourcepos.end.line;
             
-            if start_line > 0 && end_line >= start_line {
-                let is_multiline = end_line > start_line;
-                let is_text_block = matches!(node_value, NodeValue::Paragraph | NodeValue::Heading(_));
-                
-                if is_multiline && is_text_block {
-                    for line_num in start_line..=end_line {
-                        if let Some(&line_content) = lines.get(line_num - 1) {
-                            if !line_content.trim().is_empty() {
-                                blocks.push(MarkdownBlock {
-                                    id: format!("block-{}-{}", block_index, line_num),
-                                    content: line_content.to_string(),
-                                    start_line: line_num,
-                                    end_line: line_num,
-                                    block_type: "line".to_string(),
-                                });
-                                *block_index += 1;
-                            }
-                        }
-                    }
-                } else {
-                    let content = lines.get(start_line - 1..end_line)
-                        .map(|l| l.join("\n"))
-                        .unwrap_or_default();
-                    
-                    if !content.trim().is_empty() {
-                        blocks.push(MarkdownBlock {
-                            id: format!("block-{}-{}", block_index, start_line),
-                            content,
-                            start_line,
-                            end_line,
-                            block_type: get_block_type(node_value),
-                        });
-                        *block_index += 1;
-                    }
+            // 寻找结束 $$
+            let mut j = current + 1;
+            let mut found_end = false;
+            while j <= end_line {
+                if lines.get(j - 1).copied().unwrap_or("").trim().ends_with("$$") {
+                    found_end = true;
+                    break;
                 }
+                j += 1;
+            }
+            
+            if found_end {
+                result.push((current, j));
+                current = j + 1;
+                continue;
             }
         }
+        
+        // 普通行
+        result.push((current, current));
+        current += 1;
     }
-    
-    for node in root.children() {
-        collect_atom_nodes(node, &lines, &mut blocks, &mut block_index);
-    }
-    
-    blocks.sort_by(|a, b| a.start_line.cmp(&b.start_line));
-    
-    blocks
+    result
+}
+
+#[derive(Debug, Clone)]
+struct AstNode {
+    node_type: String,   // "heading", "paragraph", "code", "table", "html", "math", "yaml", "toml", "thematicBreak", "footnoteDefinition", "list", "listItem", "blockquote", "line"
+    start_line: usize,   // 1-indexed
+    end_line: usize,     // 1-indexed
 }
 
 #[tauri::command]
-fn format_markdown(markdown: &str) -> String {
+fn parse_markdown_blocks(markdown: &str) -> Vec<MarkdownBlock> {
+    use comrak::{Arena as ComrakArena, nodes::NodeValue, parse_document};
+
     let content = markdown.replace("\r\n", "\n");
-    let arena = Arena::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let arena = ComrakArena::new();
     let options = get_comrak_options();
-    
     let root = parse_document(&arena, &content, &options);
-    
-    let mut formatted: Vec<u8> = Vec::new();
-    if let Err(e) = format_commonmark(root, &options, &mut formatted) {
-        eprintln!("格式化错误: {}", e);
-        return markdown.to_string();
-    }
-    
-    let formatted = String::from_utf8_lossy(&formatted).to_string();
-    
-    let lines: Vec<&str> = formatted.lines().collect();
-    let mut result = String::new();
-    let mut prev_was_empty = true;
-    
-    for line in lines {
-        let is_empty = line.trim().is_empty();
-        
-        if is_empty {
-            if !prev_was_empty {
-                result.push('\n');
-            }
-            prev_was_empty = true;
-        } else {
-            if !result.is_empty() && !prev_was_empty {
-                result.push('\n');
-            }
-            result.push_str(line);
-            result.push('\n');
-            prev_was_empty = false;
+
+    // ---------- 第一步：用 comrak AST 收集原子节点 ----------
+    fn get_node_type(nv: &NodeValue) -> &'static str {
+        match nv {
+            NodeValue::Heading(_) => "heading",
+            NodeValue::Paragraph => "paragraph",
+            NodeValue::CodeBlock(_) => "code",
+            NodeValue::Table(_) => "table",
+            NodeValue::Math(_) => "math",
+            NodeValue::HtmlBlock(_) => "html",
+            NodeValue::List(_) => "list",
+            NodeValue::Item(_) => "listItem",
+            NodeValue::BlockQuote => "blockquote",
+            NodeValue::ThematicBreak => "thematicBreak",
+            NodeValue::FootnoteDefinition(_) => "footnoteDefinition",
+            NodeValue::FrontMatter(_) => "yaml",
+            _ => "other",
         }
     }
-    
-    result.trim_end().to_string() + "\n"
+
+    fn is_container(nv: &NodeValue) -> bool {
+        matches!(nv,
+            NodeValue::Document | NodeValue::List(_) | NodeValue::Item(_) | NodeValue::BlockQuote
+        )
+    }
+
+    fn is_complex(nv: &NodeValue) -> bool {
+        matches!(nv,
+            NodeValue::Table(_)
+                | NodeValue::CodeBlock(_)
+                | NodeValue::Math(_)
+                | NodeValue::HtmlBlock(_)
+                | NodeValue::ThematicBreak
+                | NodeValue::FootnoteDefinition(_)
+                | NodeValue::FrontMatter(_)
+        )
+    }
+
+    fn collect<'a>(
+        node: &'a comrak::nodes::AstNode<'a>,
+        lines: &[&str],
+        out: &mut Vec<AstNode>,
+    ) {
+        let data = node.data.borrow();
+        let nv = &data.value;
+        if is_container(nv) {
+            for child in node.children() {
+                collect(child, lines, out);
+            }
+            return;
+        }
+        let sp = data.sourcepos;
+        let start = sp.start.line;
+        let end = sp.end.line;
+        if start == 0 || end < start {
+            return;
+        }
+        if is_complex(nv) {
+            out.push(AstNode { node_type: get_node_type(nv).to_string(), start_line: start, end_line: end });
+        } else {
+            // paragraph / heading 等文本块，多行时逐行拆分（保持 math 完整性）
+            let is_text_block = matches!(nv, NodeValue::Paragraph | NodeValue::Heading(_));
+            if is_text_block && end > start {
+                let sub = split_lines_with_math(start, end, lines);
+                for (sl, el) in sub {
+                    out.push(AstNode { node_type: "line".to_string(), start_line: sl, end_line: el });
+                }
+            } else {
+                out.push(AstNode { node_type: get_node_type(nv).to_string(), start_line: start, end_line: end });
+            }
+        }
+    }
+
+    let mut atom_nodes: Vec<AstNode> = Vec::new();
+    for child in root.children() {
+        collect(child, &lines, &mut atom_nodes);
+    }
+    atom_nodes.sort_by(|a, b| {
+        a.start_line.cmp(&b.start_line).then(a.end_line.cmp(&b.end_line))
+    });
+
+    // ---------- 第二步：拆分 HTML 块中的 <table> ----------
+    let mut refined: Vec<AstNode> = Vec::new();
+    for node in &atom_nodes {
+        if node.node_type != "html" {
+            refined.push(node.clone());
+            continue;
+        }
+        let node_lines: Vec<&str> = lines
+            .get(node.start_line - 1..node.end_line)
+            .unwrap_or(&[])
+            .to_vec();
+        let full_content = node_lines.join("\n");
+        if !full_content.contains("<table") && !full_content.contains("</table>") {
+            refined.push(node.clone());
+            continue;
+        }
+        let mut current_start = 0usize; // 相对于 node_lines
+        for (k, line) in node_lines.iter().enumerate() {
+            let ltrim = line.trim();
+            // 表格开始
+            let table_start_re = ltrim.starts_with("<table") && (ltrim.len() == 6 || ltrim.as_bytes().get(6).map_or(false, |&b| b == b'>' || b == b' '));
+            if k > current_start && table_start_re {
+                let split = split_lines_with_math(
+                    node.start_line + current_start,
+                    node.start_line + k - 1,
+                    &lines,
+                );
+                for (sl, el) in split {
+                    refined.push(AstNode { node_type: "line".to_string(), start_line: sl, end_line: el });
+                }
+                current_start = k;
+            }
+            if line.contains("</table>") && k < node_lines.len() - 1 {
+                refined.push(AstNode {
+                    node_type: "html".to_string(),
+                    start_line: node.start_line + current_start,
+                    end_line: node.start_line + k,
+                });
+                current_start = k + 1;
+            }
+        }
+        let rem_start = node.start_line + current_start;
+        let rem_end = node.end_line;
+        if rem_start <= rem_end {
+            let remaining = lines.get(current_start..node_lines.len()).unwrap_or(&[]).join("\n");
+            if !remaining.contains("<table") && !remaining.contains("</table>") {
+                for (sl, el) in split_lines_with_math(rem_start, rem_end, &lines) {
+                    refined.push(AstNode { node_type: "line".to_string(), start_line: sl, end_line: el });
+                }
+            } else {
+                refined.push(AstNode { node_type: "html".to_string(), start_line: rem_start, end_line: rem_end });
+            }
+        }
+    }
+    atom_nodes = refined;
+
+    // ---------- 第三步：合并连续 HTML 表格节点 ----------
+    let mut merged: Vec<AstNode> = Vec::new();
+    let mut i = 0;
+    while i < atom_nodes.len() {
+        let node = &atom_nodes[i];
+        if node.node_type == "html" {
+            let node_content = lines
+                .get(node.start_line - 1..node.end_line)
+                .unwrap_or(&[])
+                .join("\n");
+            let ltrim = node_content.trim();
+            let is_table_start = ltrim.starts_with("<table") && (ltrim.len() == 6 || ltrim.as_bytes().get(6).map_or(false, |&b| b == b'>' || b == b' '));
+            if is_table_start {
+                let mut last_line = node.end_line;
+                let mut j = i + 1;
+                let mut found_end = node_content.contains("</table>");
+                while !found_end
+                    && j < atom_nodes.len()
+                    && atom_nodes[j].node_type == "html"
+                    && atom_nodes[j].start_line <= last_line + 2
+                {
+                    let nc = lines
+                        .get(atom_nodes[j].start_line - 1..atom_nodes[j].end_line)
+                        .unwrap_or(&[])
+                        .join("\n");
+                    last_line = atom_nodes[j].end_line;
+                    if nc.contains("</table>") {
+                        found_end = true;
+                    }
+                    j += 1;
+                }
+                if found_end && j > i + 1 {
+                    merged.push(AstNode { node_type: "html".to_string(), start_line: node.start_line, end_line: last_line });
+                    i = j;
+                    continue;
+                }
+            }
+        }
+        merged.push(atom_nodes[i].clone());
+        i += 1;
+    }
+    atom_nodes = merged;
+
+    // ---------- 第四步：生成最终 MarkdownBlock 列表（填充 gap 行）----------
+    let mut blocks: Vec<MarkdownBlock> = Vec::new();
+    let mut last_line_processed = 0usize;
+
+    for (idx, node) in atom_nodes.iter().enumerate() {
+        let start_line = node.start_line; // 1-indexed
+        let end_line = node.end_line;     // 1-indexed
+
+        // 填充 gap 行
+        if start_line - 1 > last_line_processed {
+            let gap_nodes = split_lines_with_math(last_line_processed + 1, start_line - 1, &lines);
+            for (gidx, (gsl, gel)) in gap_nodes.iter().enumerate() {
+                let gap_content = lines.get(gsl - 1..*gel).unwrap_or(&[]).join("\n");
+                if !gap_content.trim().is_empty() {
+                    blocks.push(MarkdownBlock {
+                        id: format!("gap-{}-{}", gsl, gidx),
+                        content: gap_content,
+                        start_line: *gsl,
+                        end_line: *gel,
+                        block_type: "line".to_string(),
+                    });
+                }
+            }
+            last_line_processed = start_line - 1;
+        }
+
+        // 添加节点本身（防止行重叠）
+        let actual_start = start_line.max(last_line_processed + 1);
+        if end_line >= actual_start {
+            let block_content = lines.get(actual_start - 1..end_line).unwrap_or(&[]).join("\n");
+            if !block_content.trim().is_empty() {
+                blocks.push(MarkdownBlock {
+                    id: format!("block-{}-{}", idx, actual_start),
+                    content: block_content,
+                    start_line: actual_start,
+                    end_line,
+                    block_type: node.node_type.clone(),
+                });
+            }
+            last_line_processed = end_line;
+        }
+    }
+
+    // 处理文件末尾剩余行
+    if last_line_processed < lines.len() {
+        let tail_nodes = split_lines_with_math(last_line_processed + 1, lines.len(), &lines);
+        for (gidx, (gsl, gel)) in tail_nodes.iter().enumerate() {
+            let gap_content = lines.get(gsl - 1..*gel).unwrap_or(&[]).join("\n");
+            if !gap_content.trim().is_empty() {
+                blocks.push(MarkdownBlock {
+                    id: format!("gap-end-{}-{}", gsl, gidx),
+                    content: gap_content,
+                    start_line: *gsl,
+                    end_line: *gel,
+                    block_type: "line".to_string(),
+                });
+            }
+        }
+    }
+
+    // ---------- 第五步：修复未闭合的 $$ 块（强制合并直到 $$ 配对完整）----------
+    // 遍历所有 block，统计每块内独立 $$ 行的数量（奇偶性），
+    // 奇数说明公式未闭合，持续吸收后续块直到 $$ 配对为偶数。
+    fn count_bare_dollars(content: &str) -> usize {
+        content.lines()
+            .filter(|l| l.trim() == "$$")
+            .count()
+    }
+
+    let mut fixed: Vec<MarkdownBlock> = Vec::with_capacity(blocks.len());
+    let mut k = 0;
+    while k < blocks.len() {
+        let mut cur = blocks[k].clone();
+        let mut dollar_count = count_bare_dollars(&cur.content);
+        // 奇数：公式未闭合，继续吸收后续块
+        while dollar_count % 2 != 0 && k + 1 < blocks.len() {
+            k += 1;
+            let next = &blocks[k];
+            cur.content = format!("{}\n{}", cur.content, next.content);
+            cur.end_line = next.end_line;
+            cur.block_type = "math".to_string();
+            dollar_count = count_bare_dollars(&cur.content);
+        }
+        fixed.push(cur);
+        k += 1;
+    }
+    let blocks = fixed;
+
+    blocks
+}
+
+/// 格式化 Markdown 文本：与 TS handleFormatMarkdown 核心逻辑一致。
+/// 步骤：
+///  1. 统一换行符
+///  2. 将单行 $$公式$$ 展开为独立的块级公式（多行格式）
+///  3. 确保 $$ 行前后各有一个空行
+///  4. 压缩连续空行（>=3 个换行→2 个）
+///  5. trim
+#[tauri::command]
+fn format_markdown(markdown: &str) -> String {
+    use regex::Regex;
+
+    let mut content = markdown.replace("\r\n", "\n");
+
+    // 步骤 2：将单行 $$公式$$ 展开为多行块级公式
+    // 对应 TS: formattedContent.replace(/\$\$([^\$\n]+?)\$\$/g, '\n\n$$\n$1\n$$\n\n')
+    let re_inline_block = Regex::new(r"\$\$([^\$\n]+?)\$\$").unwrap();
+    content = re_inline_block.replace_all(&content, "\n\n$$\n$1\n$$\n\n").to_string();
+
+    // 步骤 3：确保 $$ 行前后各有一个空行
+    let mut lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+    let mut in_formula = false;
+    let mut i = 0;
+    while i < lines.len() {
+        if lines[i].trim() == "$$" {
+            if !in_formula {
+                // 公式开始：确保前面有空行
+                if i > 0 && !lines[i - 1].trim().is_empty() {
+                    lines.insert(i, String::new());
+                    i += 1; // 跳过刚插入的空行，仍处理当前 $$
+                }
+                in_formula = true;
+            } else {
+                // 公式结束：确保后面有空行
+                if i + 1 < lines.len() && !lines[i + 1].trim().is_empty() {
+                    lines.insert(i + 1, String::new());
+                }
+                in_formula = false;
+            }
+        }
+        i += 1;
+    }
+    content = lines.join("\n");
+
+    // 步骤 4：压缩连续空行（3 个及以上换行→2 个）
+    let re_multi = Regex::new(r"\n{3,}").unwrap();
+    content = re_multi.replace_all(&content, "\n\n").to_string();
+
+    // 步骤 5：trim
+    content.trim().to_string()
 }
 
 /// 将 Markdown 转换为 HTML（用于预览）
