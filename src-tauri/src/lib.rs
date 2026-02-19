@@ -4,7 +4,7 @@ use pulldown_cmark::{html, Options, Parser};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use thiserror::Error;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -496,7 +496,7 @@ fn markdown_to_html(markdown: &str) -> String {
 }
 
 /// 生成完整的 HTML 页面（用于 PDF 导出）
-fn generate_full_html(html_content: &str, title: &str) -> String {
+fn generate_full_html(html_content: &str, title: &str, katex_css_path: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
 <html lang="zh-CN">
@@ -504,7 +504,7 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{title}</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css">
+    <link rel="stylesheet" href="{katex_css_path}">
     <style>
         * {{
             margin: 0;
@@ -665,6 +665,7 @@ fn generate_full_html(html_content: &str, title: &str) -> String {
     </div>
 </body>
 </html>"#,
+        katex_css_path = katex_css_path,
         title = title,
         html_content = html_content
     )
@@ -679,8 +680,25 @@ async fn export_to_pdf(window: tauri::Window, html_content: String, output_path:
             let _ = window.emit("export-progress", ProgressPayload { message: message.to_string() });
         };
 
+        // 获取 KaTeX CSS 路径 (本地或 CDN 回退)
+        let app_handle = window.app_handle();
+        let katex_css_res = app_handle.path().resource_dir()
+            .map(|p| p.join("public/katex/katex.min.css"));
+            
+        let katex_css_url = match katex_css_res {
+            Ok(p) if p.exists() => {
+                let path_str = p.to_string_lossy().replace("\\", "/");
+                if path_str.starts_with('/') {
+                    format!("file://{}", path_str)
+                } else {
+                    format!("file:///{}", path_str)
+                }
+            },
+            _ => "https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css".to_string(),
+        };
+
         // 生成完整的 HTML 页面
-        let full_html = generate_full_html(&html_content, &title);
+        let full_html = generate_full_html(&html_content, &title, &katex_css_url);
 
         // 确定输出路径
         let output_path_buf = std::path::Path::new(&output_path);
