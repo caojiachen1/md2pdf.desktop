@@ -33,6 +33,7 @@ import {
 } from '@fluentui/react-icons';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { writeTextFile } from '@tauri-apps/plugin-fs';
 import ReactMarkdown from 'react-markdown';
@@ -526,12 +527,93 @@ function App() {
     );
   }, [dispatchToast]);
 
+  // 判断是否为 Markdown 文件路径
+  const isMarkdownPath = useCallback((path: string) => {
+    return /\.(md|markdown)$/i.test(path);
+  }, []);
+
+  // 统一按路径加载 Markdown
+  const loadMarkdownFromPath = useCallback(async (path: string, skipDirtyConfirm = false) => {
+    if (!isMarkdownPath(path)) {
+      showErrorToast('仅支持导入 Markdown 文件（.md / .markdown）');
+      return false;
+    }
+
+    if (!skipDirtyConfirm && isDirty) {
+      const confirm = await window.confirm('当前文件有未保存的更改，确定要打开新文件吗？（更改将丢失）');
+      if (!confirm) return false;
+    }
+
+    try {
+      setIsLoading(true);
+      setLoadingMessage('正在读取文件...');
+
+      const content = await invoke<string>('read_markdown_file', { path });
+      setMarkdownContent(content);
+
+      setLoadingMessage('正在解析文档结构...');
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      const blocks = await parseMarkdownToBlocks(content);
+      setMarkdownBlocks(blocks);
+
+      setCurrentFile(path);
+      setIsDirty(false);
+      showSuccessToast(`已加载 ${path.split(/[/\\]/).pop()}`);
+      return true;
+    } catch (error) {
+      showErrorToast(`读取文件失败: ${error}`);
+      return false;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [isMarkdownPath, isDirty, parseMarkdownToBlocks, showErrorToast, showSuccessToast]);
+
+  // 监听窗口拖拽导入
+  useEffect(() => {
+    let unlistenDragDrop: (() => void) | null = null;
+
+    const setupDragDrop = async () => {
+      unlistenDragDrop = await getCurrentWindow().onDragDropEvent(async (event) => {
+        if (event.payload.type !== 'drop') return;
+
+        const droppedPath = event.payload.paths.find(isMarkdownPath);
+        if (!droppedPath) {
+          showErrorToast('仅支持拖入 Markdown 文件（.md / .markdown）');
+          return;
+        }
+
+        await loadMarkdownFromPath(droppedPath);
+      });
+    };
+
+    setupDragDrop();
+
+    return () => {
+      if (unlistenDragDrop) {
+        unlistenDragDrop();
+      }
+    };
+  }, [isMarkdownPath, loadMarkdownFromPath, showErrorToast]);
+
+  // 启动时检查：是否通过“拖到 exe”方式携带了 Markdown 路径
+  useEffect(() => {
+    const loadFromLaunchPath = async () => {
+      try {
+        const launchPath = await invoke<string | null>('get_launch_markdown_path');
+        if (launchPath) {
+          await loadMarkdownFromPath(launchPath, true);
+        }
+      } catch {
+        // 忽略获取启动参数失败，不影响正常功能
+      }
+    };
+
+    loadFromLaunchPath();
+  }, [loadMarkdownFromPath]);
+
   // 选择 Markdown 文件
   const handleSelectFile = useCallback(async () => {
-    if (isDirty) {
-      const confirm = await window.confirm('当前文件有未保存的更改，确定要打开新文件吗？（更改将丢失）');
-      if (!confirm) return;
-    }
     try {
       const selected = await open({
         multiple: false,
@@ -542,28 +624,12 @@ function App() {
       });
 
       if (selected) {
-        setIsLoading(true);
-        setLoadingMessage('正在读取文件...');
-
-        const content = await invoke<string>('read_markdown_file', { path: selected });
-        setMarkdownContent(content);
-
-        setLoadingMessage('正在解析文档结构...');
-        await new Promise(resolve => setTimeout(resolve, 10));
-
-        const blocks = await parseMarkdownToBlocks(content);
-        setMarkdownBlocks(blocks);
-        
-        setCurrentFile(selected as string);
-        setIsDirty(false);
-        showSuccessToast(`已加载 ${(selected as string).split(/[/\\\\]/).pop()}`);
-        setIsLoading(false);
+        await loadMarkdownFromPath(selected as string);
       }
     } catch (error) {
-      setIsLoading(false);
-      showErrorToast(`读取文件失败: ${error}`);
+      showErrorToast(`打开文件失败: ${error}`);
     }
-  }, [showSuccessToast, showErrorToast, isDirty, parseMarkdownToBlocks]);
+  }, [loadMarkdownFromPath, showErrorToast]);
 
   // 保存文件
   const handleSave = useCallback(async () => {

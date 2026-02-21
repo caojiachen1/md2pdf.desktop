@@ -47,6 +47,23 @@ fn read_markdown_file(path: &str) -> Result<String, AppError> {
     Ok(content)
 }
 
+fn is_markdown_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "md" | "markdown"))
+        .unwrap_or(false)
+}
+
+/// 获取通过命令行参数传入的 Markdown 文件路径（用于将文件拖到 exe 启动）
+#[tauri::command]
+fn get_launch_markdown_path() -> Option<String> {
+    std::env::args_os()
+        .skip(1)
+        .map(std::path::PathBuf::from)
+        .find(|path| path.is_file() && is_markdown_file(path))
+        .map(|path| path.to_string_lossy().to_string())
+}
+
 fn get_comrak_options() -> ComrakOptions<'static> {
     let mut options = ComrakOptions::default();
     options.extension.strikethrough = true;
@@ -829,6 +846,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .invoke_handler(tauri::generate_handler![
             read_markdown_file,
+            get_launch_markdown_path,
             markdown_to_html,
             export_to_pdf,
             parse_markdown_blocks,
