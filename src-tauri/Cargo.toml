@@ -2,7 +2,7 @@
 name = "md2pdf-desktop"
 version = "1.0.0"
 description = "Markdown to PDF converter with KaTeX support"
-authors = ["Your Name"]
+authors = ["hqsrawmelon"]
 edition = "2021"
 
 [lib]

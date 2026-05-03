@@ -28,3 +28,7 @@ npm-debug.log*
 # Temporary files
 *.tmp
 *.temp
+
+# Development certificate
+devcert.pfx
+*.msix
